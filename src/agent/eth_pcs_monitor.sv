@@ -66,6 +66,11 @@ class eth_pcs_monitor extends uvm_monitor;
       bfm.tx_underrun_count, bfm.idle_ins_count, bfm.idle_del_count), UVM_LOW)
   endfunction
 
+  // 链路复位后由测试调用：丢弃被复位斩断的半帧装配状态
+  function void reset_assembler();
+    asm.reset();
+  endfunction
+
   // 记分板/测试用查询接口
   function int crc_err_count();
     return asm.crc_err_count;

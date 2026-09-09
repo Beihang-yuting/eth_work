@@ -271,6 +271,16 @@ package eth_tb_pkg;
       void'(uvm_config_db#(virtual tb_ctrl_if)::get(this, "", "vif_ctrl",
                                                     vif_ctrl));
 
+      // +NUM_FRAMES=<n>：命令行临时覆盖流量规模（如 5000 帧专项复跑），
+      // 不改各测试的默认标准
+      begin
+        int n;
+        if ($value$plusargs("NUM_FRAMES=%d", n) && n > 0) begin
+          num_frames  = n;
+          run_timeout = 100ms;
+        end
+      end
+
       env = eth_loopback_env::type_id::create("env", this);
     endfunction
 
@@ -405,6 +415,83 @@ package eth_tb_pkg;
       run_traffic(num_frames, run_timeout);
       `uvm_info("TEST", $sformatf("段2(复位后) 完成 match=%0d",
                                   env.sb.match_count), UVM_LOW)
+
+      phase.drop_objection(this);
+    endtask
+
+  endclass
+
+  // ---------------- 多次复位覆盖测试 ----------------
+
+  // 多轮"流量进行中拉复位"：每轮先起流量、中途随机时刻复位（宽松结算
+  // 被斩断的在途帧），重新 link-up 后跑严格段验证复位后流量完全干净。
+  // 覆盖点：复位打断帧传输、连续多次复位后状态清理彻底性、每轮
+  // 重新锁定与恢复。
+  class eth_multi_reset_test extends eth_loopback_test;
+
+    `uvm_component_utils(eth_multi_reset_test)
+
+    // 复位轮数与每段帧数
+    protected int num_rounds = 5;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      num_frames  = 500;
+      run_timeout = 100ms;
+    endfunction
+
+    virtual task run_phase(uvm_phase phase);
+      phase.raise_objection(this);
+
+      if (vif_ctrl == null)
+        `uvm_fatal("TEST", "多次复位测试需要 top 提供 tb_ctrl_if")
+
+      wait_link_up();
+
+      for (int round = 0; round < num_rounds; round++) begin
+
+        // 流量进行中复位：宽松模式起流，随机延迟后拉复位斩断在途帧
+        env.sb.lenient = 1;
+        fork
+          begin
+            eth_loopback_seq s = eth_loopback_seq::type_id::create("s_mid");
+            s.num_frames = num_frames;
+            s.start(env.agent_a.sqr);
+          end
+          begin
+            #($urandom_range(5, 30) * 1us);
+            vif_ctrl.reset_req = 1;
+            wait (vif_ctrl.reset_req == 0);
+          end
+        join
+
+        // 排空 + 结算：被复位毁掉的帧计 lost，凭空帧零容忍
+        #50us;
+        env.sb.flush_pending_as_lost();
+        `uvm_info("TEST", $sformatf(
+          "第 %0d 轮复位段: match=%0d lost=%0d bad=%0d mismatch=%0d",
+          round + 1, env.sb.match_count, env.sb.lost_count,
+          env.sb.disturbed_bad, env.sb.mismatch_count), UVM_LOW)
+        if (env.sb.mismatch_count != 0)
+          `uvm_error("TEST", $sformatf("第 %0d 轮复位段出现错配帧", round + 1))
+
+        // 复位后重建：清残帧装配态、清记分板、重新 link-up
+        env.agent_b.mon.reset_assembler();
+        env.sb.clear();
+        env.sb.lenient = 0;
+        wait_link_up();
+
+        // 复位后严格段：全净才算恢复成功
+        run_traffic(num_frames, run_timeout);
+        `uvm_info("TEST", $sformatf("第 %0d 轮复位后严格段 完成 match=%0d",
+                                    round + 1, env.sb.match_count), UVM_LOW)
+
+        // 末轮结果保留给 check_phase 汇总，其余轮间清零
+        if (round != num_rounds - 1) env.sb.clear();
+      end
+
+      `uvm_info("TEST", $sformatf("多次复位覆盖完成: %0d 轮", num_rounds),
+                UVM_LOW)
 
       phase.drop_objection(this);
     endtask

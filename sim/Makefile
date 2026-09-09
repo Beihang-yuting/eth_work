@@ -38,6 +38,13 @@ stress_fec: loopback_simv
 	  -l $(BUILD)/loopback/stress_fec.log
 	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_fec.log
 
+# 多次复位覆盖：5 轮"流量中复位 + 复位后严格段"，末轮 500 帧全净
+multi_reset: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/loopback/multi_reset.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset.log
+	grep -q "第 5 轮复位后严格段 完成 match=500" $(BUILD)/loopback/multi_reset.log
+
 # 中途复位恢复（段2 复位后 500 帧必须全净）
 reset_recovery: loopback_simv
 	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_reset_recovery_test +UVM_MAX_QUIT_COUNT=5 \

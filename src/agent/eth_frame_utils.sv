@@ -118,6 +118,13 @@ class frame_assembler_c;
     in_frame = 0;
   endfunction
 
+  // 复位装配状态（统计保留）：链路复位斩断的半帧必须丢弃，否则复位后
+  // 首个真帧的字节会被并进残帧、以坏帧形式污染下一段
+  function void reset();
+    in_frame = 0;
+    line_bytes.delete();
+  endfunction
+
   // 推入一拍 XGMII。检出完整帧时返回 1 并填充 res。
   // 失败路径：帧内出现非 T 控制字符（如 ERROR）时丢弃当前帧并复位状态，
   // 计入 CRC 错（线路损伤的统一表现），不中断后续装配。
