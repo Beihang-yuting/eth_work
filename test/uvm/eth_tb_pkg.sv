@@ -236,6 +236,9 @@ package eth_tb_pkg;
     // TB 控制接口（复位/扰动测试用；普通测试可为 null）
     protected virtual tb_ctrl_if vif_ctrl;
 
+    // MLD lane 数（+SPEED=40g 时为 4，其余 1）
+    protected int mld_lanes = 1;
+
     function new(string name, uvm_component parent);
       super.new(name, parent);
     endfunction
@@ -247,23 +250,50 @@ package eth_tb_pkg;
 
       super.build_phase(phase);
 
+      // +SPEED=40g：MLD 4 lane 模式（top_40g 提供每 lane 串行接口，
+      // 键名 vif_serial_<a|b>_l<i>），AM 间隔用仿真加速值
+      begin
+        string speed = "10g";
+        void'($value$plusargs("SPEED=%s", speed));
+        mld_lanes = (speed == "40g") ? 4 : 1;
+      end
+
       if (!uvm_config_db#(virtual xgmii_if)::get(this, "", "vif_xgmii_a", vxa) ||
-          !uvm_config_db#(virtual xgmii_if)::get(this, "", "vif_xgmii_b", vxb) ||
-          !uvm_config_db#(virtual serial_if)::get(this, "", "vif_serial_a", vsa) ||
-          !uvm_config_db#(virtual serial_if)::get(this, "", "vif_serial_b", vsb))
-        `uvm_fatal("CFG", "test 未取得 top 的接口句柄")
+          !uvm_config_db#(virtual xgmii_if)::get(this, "", "vif_xgmii_b", vxb))
+        `uvm_fatal("CFG", "test 未取得 XGMII 接口句柄")
 
       cfg_a = eth_pcs_cfg::type_id::create("cfg_a");
       cfg_a.is_active  = 1;
       cfg_a.fec_enable = fec_mode;
       cfg_a.vif_xgmii  = vxa;
-      cfg_a.vif_serial = vsa;
 
       cfg_b = eth_pcs_cfg::type_id::create("cfg_b");
       cfg_b.is_active  = 0;
       cfg_b.fec_enable = fec_mode;
       cfg_b.vif_xgmii  = vxb;
-      cfg_b.vif_serial = vsb;
+
+      if (mld_lanes > 1) begin
+        cfg_a.num_lanes  = mld_lanes;
+        cfg_b.num_lanes  = mld_lanes;
+        cfg_a.am_spacing = 512;
+        cfg_b.am_spacing = 512;
+        if (fec_mode)
+          `uvm_fatal("CFG", "40g 模式不支持 FEC 测试变体")
+        for (int i = 0; i < mld_lanes; i++) begin
+          if (!uvm_config_db#(virtual serial_if)::get(this, "",
+                $sformatf("vif_serial_a_l%0d", i), cfg_a.vif_serial_lanes[i]) ||
+              !uvm_config_db#(virtual serial_if)::get(this, "",
+                $sformatf("vif_serial_b_l%0d", i), cfg_b.vif_serial_lanes[i]))
+            `uvm_fatal("CFG", $sformatf("未取得 lane%0d 串行接口", i))
+        end
+      end
+      else begin
+        if (!uvm_config_db#(virtual serial_if)::get(this, "", "vif_serial_a", vsa) ||
+            !uvm_config_db#(virtual serial_if)::get(this, "", "vif_serial_b", vsb))
+          `uvm_fatal("CFG", "test 未取得串行接口句柄")
+        cfg_a.vif_serial = vsa;
+        cfg_b.vif_serial = vsb;
+      end
 
       uvm_config_db#(eth_pcs_cfg)::set(this, "env", "cfg_a", cfg_a);
       uvm_config_db#(eth_pcs_cfg)::set(this, "env", "cfg_b", cfg_b);

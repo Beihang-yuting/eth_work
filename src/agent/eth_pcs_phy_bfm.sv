@@ -53,19 +53,32 @@ class eth_pcs_phy_bfm;
   protected fec_cl74_encoder_c fenc;
   protected fec_cl74_decoder_c fdec;
 
+  // 多 lane（Clause 82 MLD）流水线：num_lanes>1 时启用。
+  // 每物理 lane 独立 bit 队列与块同步；MLD 负责分发/AM/去偏/重组
+  protected mld_tx_c     mtx;
+  protected mld_rx_c     mrx;
+  protected block_sync_c bsync_l[MLD_MAX_LANES];
+  protected logic        txbit_lq[MLD_MAX_LANES][$];
+
   // TX 串行 bit 队列（编码侧生产、串行侧消费）与 RX XGMII 引脚驱动队列
   protected logic     txbit_q[$];
   protected xgmii64_t rxpin_q[$];
   protected bit       tx_started;
   protected bit       tx_primed;   // 弹性垫已预灌标志（复位后重灌）
 
-  // RX 链路是否已完成块/码字对齐（test 在发流前等待，模拟 link-up）
+  // RX 链路是否已完成块/码字/多 lane 对齐（test 在发流前等待）
   function bit rx_locked();
+    if (cfg.num_lanes > 1) return mrx.is_aligned();
     return cfg.fec_enable ? fdec.is_locked() : bsync.is_locked();
   endfunction
 
-  // 对外暴露 RX 侧对齐器统计的只读视图
+  // 对外暴露 RX 侧对齐器统计的只读视图（多 lane 取各 lane 累计）
   function int get_slip_count();
+    if (cfg.num_lanes > 1) begin
+      int s = 0;
+      for (int i = 0; i < cfg.num_lanes; i++) s += bsync_l[i].slip_count;
+      return s;
+    end
     return cfg.fec_enable ? fdec.slip_count : bsync.slip_count;
   endfunction
 
@@ -86,16 +99,39 @@ class eth_pcs_phy_bfm;
     fenc      = new();
     fdec      = new();
     tx_started = 0;
+
+    if (cfg.num_lanes > 1) begin
+      mtx = new(cfg.num_lanes, cfg.am_spacing);
+      mrx = new(cfg.num_lanes, cfg.am_spacing);
+      foreach (bsync_l[i]) bsync_l[i] = new();
+    end
   endfunction
 
-  // 启动全部通路线程；由 agent 的 run_phase fork 调用，永不返回
+  // 启动全部通路线程；由 agent 的 run_phase fork 调用，永不返回。
+  // 多 lane 时串行收发按 lane 各起一个线程
   task run();
-    fork
-      tx_sample_loop();
-      tx_serial_loop();
-      rx_serial_loop();
-      rx_pin_drive_loop();
-    join
+    if (cfg.num_lanes > 1) begin
+      fork
+        tx_sample_loop();
+        rx_pin_drive_loop();
+      join_none
+      for (int i = 0; i < cfg.num_lanes; i++) begin
+        automatic int li = i;
+        fork
+          tx_serial_lane_loop(li);
+          rx_serial_lane_loop(li);
+        join_none
+      end
+      wait (0);
+    end
+    else begin
+      fork
+        tx_sample_loop();
+        tx_serial_loop();
+        rx_serial_loop();
+        rx_pin_drive_loop();
+      join
+    end
   endtask
 
   // ---------------- TX：XGMII -> 串行 ----------------
@@ -112,10 +148,26 @@ class eth_pcs_phy_bfm;
         continue;
       end
 
-      // 首拍先灌弹性垫（经扰码器，保持码流顺序连续）
+      // 首拍先灌弹性垫（经扰码器，保持码流顺序连续）。
+      // 多 lane 时垫必须走 MLD 正常分发路径，保证轮转/AM 计数一致
       if (!tx_primed) begin
-        repeat (PRIME_BLOCKS) push_idle_block();
-        idle_ins_count -= PRIME_BLOCKS;   // 垫不计入弹性插入统计
+        if (cfg.num_lanes > 1) begin
+          repeat (PRIME_BLOCKS * cfg.num_lanes) begin
+            block66_t ib;
+            int lane;
+            bit amv;
+            block66_t amb;
+            ib.sync    = SYNC_CTRL;
+            ib.payload = scr.scramble({56'h0, BT_CTRL});
+            mtx.push_block(ib, lane, amv, amb);
+            if (amv) push66(txbit_lq[lane], amb);
+            push66(txbit_lq[lane], ib);
+          end
+        end
+        else begin
+          repeat (PRIME_BLOCKS) push_idle_block();
+          idle_ins_count -= PRIME_BLOCKS;   // 垫不计入弹性插入统计
+        end
         tx_primed = 1;
       end
 
@@ -144,24 +196,30 @@ class eth_pcs_phy_bfm;
         // 弹性删除：字时钟快于位时钟/66 时队列会持续增长，删 idle 块
         // 平衡速率（被删块不过扰码器，码流连续性不受影响）
         if (blk.sync == SYNC_CTRL && blk.payload == {56'h0, BT_CTRL} &&
-            txbit_q.size() > del_thresh()) begin
+            ((cfg.num_lanes > 1) ? txbit_lq[0].size()
+                                 : txbit_q.size()) > del_thresh()) begin
           idle_del_count++;
           continue;
         end
 
         blk.payload = scr.scramble(blk.payload);
 
-        if (cfg.fec_enable) begin
+        if (cfg.num_lanes > 1) begin
+          // MLD 分发：AM 先行入该 lane 队列，数据块随后
+          int lane;
+          bit amv;
+          block66_t amb;
+          mtx.push_block(blk, lane, amv, amb);
+          if (amv) push66(txbit_lq[lane], amb);
+          push66(txbit_lq[lane], blk);
+        end
+        else if (cfg.fec_enable) begin
           logic cw[FEC_N];
           if (fenc.push_block(blk, cw))
             for (int i = 0; i < FEC_N; i++) txbit_q.push_back(cw[i]);
         end
         else begin
-          // 同步头发送顺序（802.3 惯例，与 svt VIP 实测一致）：数据块
-          // "01" 先发 0、控制块 "10" 先发 1，即先发 sync[1] 再 sync[0]
-          txbit_q.push_back(blk.sync[1]);
-          txbit_q.push_back(blk.sync[0]);
-          for (int i = 0; i < 64; i++) txbit_q.push_back(blk.payload[i]);
+          push66(txbit_q, blk);
         end
       end
     end
@@ -187,6 +245,50 @@ class eth_pcs_phy_bfm;
       else begin
         cfg.vif_serial.tx_cb.tx_bit <= 1'b0;
         if (tx_started) tx_underrun_count++;
+      end
+    end
+  endtask
+
+  // 66b 块按线路发送序压入指定 bit 队列。
+  // 同步头发送顺序（802.3 惯例，与 svt VIP 实测一致）：数据块 "01"
+  // 先发 0、控制块 "10" 先发 1，即先发 sync[1] 再 sync[0]
+  protected function void push66(ref logic q[$], input block66_t b);
+    q.push_back(b.sync[1]);
+    q.push_back(b.sync[0]);
+    for (int i = 0; i < 64; i++) q.push_back(b.payload[i]);
+  endfunction
+
+  // 多 lane 串行发送线程：每 bit 时钟从本 lane 队列出 1 bit。
+  // 多 lane 域约定生产恒盈余（字钟 +100ppm），队列空仅发生在启动
+  // 瞬态（发 0，对端搜索期无害）；稳态断流计 underrun 暴露
+  protected task tx_serial_lane_loop(int li);
+    forever begin
+      @(cfg.vif_serial_lanes[li].tx_cb);
+      if (txbit_lq[li].size() > 0) begin
+        cfg.vif_serial_lanes[li].tx_cb.tx_bit <= txbit_lq[li].pop_front();
+        tx_started = 1;
+      end
+      else begin
+        cfg.vif_serial_lanes[li].tx_cb.tx_bit <= 1'b0;
+        if (tx_started) tx_underrun_count++;
+      end
+    end
+  endtask
+
+  // 多 lane 串行接收线程：本 lane 块同步 -> 锁定块交 MLD ->
+  // 重组出的块走公共交付路径
+  protected task rx_serial_lane_loop(int li);
+    forever begin
+      @(cfg.vif_serial_lanes[li].rx_cb);
+      begin
+        logic b = $isunknown(cfg.vif_serial_lanes[li].rx_cb.rx_bit)
+                  ? 1'b0 : cfg.vif_serial_lanes[li].rx_cb.rx_bit;
+        block66_t blk;
+        if (bsync_l[li].push_bit(b, blk) && bsync_l[li].is_locked()) begin
+          block66_t ob;
+          mrx.push_block(li, blk);
+          while (mrx.pop_block(ob)) deliver_block(ob);
+        end
       end
     end
   endtask
@@ -281,6 +383,13 @@ class eth_pcs_phy_bfm;
     rxpin_q.delete();
     tx_started = 0;
     tx_primed  = 0;
+
+    if (cfg.num_lanes > 1) begin
+      mtx.reset();
+      mrx.reset();
+      foreach (bsync_l[i]) bsync_l[i].reset();
+      foreach (txbit_lq[i]) txbit_lq[i].delete();
+    end
   endfunction
 
 endclass

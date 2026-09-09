@@ -30,8 +30,17 @@ class eth_pcs_agent extends uvm_agent;
 
     if (!uvm_config_db#(eth_pcs_cfg)::get(this, "", "cfg", cfg) || cfg == null)
       `uvm_fatal("CFG", "eth_pcs_agent 未取得 eth_pcs_cfg")
-    if (cfg.vif_xgmii == null || cfg.vif_serial == null)
-      `uvm_fatal("CFG", "eth_pcs_cfg 中接口句柄为空")
+    if (cfg.vif_xgmii == null)
+      `uvm_fatal("CFG", "eth_pcs_cfg.vif_xgmii 为空")
+    if (cfg.num_lanes <= 1 && cfg.vif_serial == null)
+      `uvm_fatal("CFG", "单 lane 模式 vif_serial 为空")
+    if (cfg.num_lanes > 1) begin
+      if (cfg.fec_enable)
+        `uvm_fatal("CFG", "MLD 多 lane 模式暂不支持叠加 FEC")
+      for (int i = 0; i < cfg.num_lanes; i++)
+        if (cfg.vif_serial_lanes[i] == null)
+          `uvm_fatal("CFG", $sformatf("vif_serial_lanes[%0d] 为空", i))
+    end
 
     // 向子组件透传同一 cfg
     uvm_config_db#(eth_pcs_cfg)::set(this, "*", "cfg", cfg);

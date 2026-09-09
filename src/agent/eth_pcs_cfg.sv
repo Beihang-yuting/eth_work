@@ -24,9 +24,18 @@ class eth_pcs_cfg extends uvm_object;
   // 每帧之后驱动的全空闲拍数（8 字节/拍；2 拍 = 16 字节 ≥ 最小 IPG 12）
   int idle_words_per_gap = 2;
 
+  // 多 lane（Clause 82 MLD，40G=4）：1 = 单 lane 经典路径；>1 时启用
+  // MLD 分发/重组，串行接口用 vif_serial_lanes[0..num_lanes-1]，
+  // vif_serial 不用。MLD 模式下 fec_enable 必须为 0（未支持叠加）。
+  int num_lanes = 1;
+
+  // 每 lane AM 间隔（标准 16384；仿真提速可调小，两端一致即可）
+  int am_spacing = 16384;
+
   // 边界接口句柄：由 test 从 config_db 取得后填入
   virtual xgmii_if  vif_xgmii;
   virtual serial_if vif_serial;
+  virtual serial_if vif_serial_lanes[MLD_MAX_LANES];
 
   function new(string name = "eth_pcs_cfg");
     super.new(name);

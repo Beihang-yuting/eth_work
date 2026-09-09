@@ -238,12 +238,82 @@ module tb_pcs_unit;
     $display("[OK] frame utils roundtrip x50");
   endtask
 
+  // 6. MLD：4 lane 分发 -> 注入偏斜 + 物理乱接 -> 识别/去偏/重组闭环
+  task automatic test_mld();
+    localparam int LANES = 4;
+    localparam int SPACING = 64;
+
+    mld_tx_c tx = new(LANES, SPACING);
+    mld_rx_c rx = new(LANES, SPACING);
+
+    block66_t sent[$];
+    block66_t got[$];
+    block66_t lane_stream[LANES][$];
+    int       perm[LANES] = '{2, 0, 3, 1};   // 逻辑->物理乱接映射
+    int       skew[LANES] = '{0, 3, 7, 12};  // 各物理 lane 起始偏斜（块）
+    int       cursor[LANES];
+    int       remaining;
+
+    // TX：2000 个随机块经分发（AM 由 TX 自插）
+    repeat (2000) begin
+      block66_t b;
+      int lane;
+      bit am_v;
+      block66_t am_b;
+
+      b.sync    = ($urandom_range(0, 1)) ? SYNC_DATA : SYNC_CTRL;
+      b.payload = {$urandom, $urandom};
+      // 规避随机控制块撞 AM 图案（低 24bit 置固定非 AM 值）
+      if (b.sync == SYNC_CTRL) b.payload[23:0] = 24'h5A5A5A;
+
+      sent.push_back(b);
+      tx.push_block(b, lane, am_v, am_b);
+      if (am_v) lane_stream[perm[lane]].push_back(am_b);
+      lane_stream[perm[lane]].push_back(b);
+    end
+
+    // 投递：lane p 在全网累计投出 < skew[p] 块前按兵不动（起始偏斜），
+    // 之后各 lane 随机交错推进 —— 模拟去偏斜必须处理的到达差
+    foreach (cursor[i]) cursor[i] = 0;
+    remaining = 0;
+    foreach (lane_stream[i]) remaining += lane_stream[i].size();
+
+    while (remaining > 0) begin
+      int p = $urandom_range(0, LANES - 1);
+      int total_delivered = 0;
+      block66_t ob;
+
+      for (int j = 0; j < LANES; j++) total_delivered += cursor[j];
+      if (total_delivered < skew[p]) continue;
+      if (cursor[p] >= lane_stream[p].size()) continue;
+
+      rx.push_block(p, lane_stream[p][cursor[p]]);
+      cursor[p]++;
+      remaining--;
+
+      while (rx.pop_block(ob)) got.push_back(ob);
+    end
+
+    begin
+      block66_t ob;
+      while (rx.pop_block(ob)) got.push_back(ob);
+    end
+
+    check("mld: aligned", rx.is_aligned());
+    check("mld: no realign", rx.realign_count == 0);
+    check("mld: got count", got.size() == sent.size());
+    foreach (got[i]) check("mld: block order", got[i] == sent[i]);
+    $display("[OK] mld distribute/deskew/reassemble x%0d (skew+lane-swap)",
+             sent.size());
+  endtask
+
   initial begin
     test_codec();
     test_scrambler();
     test_block_sync();
     test_fec();
     test_frame_utils();
+    test_mld();
     $display("UNIT_TEST_PASS (%0d checks)", test_count);
     $finish;
   end

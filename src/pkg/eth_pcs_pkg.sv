@@ -18,6 +18,7 @@ package eth_pcs_pkg;
   `include "pcs/pcs_codec.sv"
   `include "pcs/scrambler.sv"
   `include "pcs/block_sync.sv"
+  `include "pcs/mld.sv"
   `include "fec/fec_cl74.sv"
   `include "agent/eth_frame_utils.sv"
   `include "agent/eth_pcs_cfg.sv"

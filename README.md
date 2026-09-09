@@ -11,9 +11,9 @@ aip_clk（vendored 于 third_party/aip_core，精度提到 1fs），字/位时�
 文档索引：
 - 设计：`docs/architecture.md`（含扩展路线图与 VIP 对接备忘）
 - 集成/使用（每模式一份）：`docs/integration_10g_basekr.md`、
-  `docs/integration_25g_5g.md`
+  `docs/integration_25g_5g.md`、`docs/integration_40g.md`
 - 可跑示例（每模式一份）：`examples/10g_basekr_loopback/`、
-  `examples/25g_loopback/`
+  `examples/25g_loopback/`、`examples/40g_loopback/`
 
 ## 运行（10.11.10.53，需 VCS 环境）
 
@@ -27,6 +27,8 @@ make stress_fec      # 大流量（FEC 开）
 make reset_recovery  # 中途复位：复位后重新 link-up，每段 500 帧
 make disturb         # 链路扰动（反压等效）：扰动毁帧可容忍，撤扰后 500 帧全净
 make svt             # 阶段 2：svt VIP 交叉验证（VIP 500 帧 + 我方 1000 帧）
+make loopback_40g    # 40G（4 lane MLD）环回/大流量/多次复位：
+make stress_40g multi_reset_40g
 ```
 
 测试硬性要求（所有新场景默认遵守）：大流量（1000 帧标准）、错误即停（+UVM_MAX_QUIT_COUNT=5）、反压/扰动后可恢复、
