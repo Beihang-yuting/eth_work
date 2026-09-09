@@ -98,7 +98,8 @@ module tb_pcs_unit;
       b.payload = s.scramble(b.payload);
       sent.push_back(b);
 
-      for (int i = 0; i < 2; i++) begin
+      // 同步头发送顺序与 phy_bfm 一致：先 sync[1] 后 sync[0]
+      for (int i = 1; i >= 0; i--) begin
         block66_t ob;
         if (bs.push_bit(b.sync[i], ob) && bs.is_locked()) got.push_back(ob);
       end

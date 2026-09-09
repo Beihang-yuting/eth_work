@@ -177,8 +177,13 @@ class fec_cl74_decoder_c;
     bitbuf.delete();
 
     if (syn != 0) begin
-      if (try_correct(cw, syn)) corrected_count++;
-      else                      uncorrectable_count++;
+      // 保护：不可纠码字连续大量出现（链路结构性损坏）时停用纠错搜索
+      // —— try_correct 全位置扫描代价高，病态流下会拖死仿真
+      if (uncorrectable_count > 50) begin
+        uncorrectable_count++;
+      end
+      else if (try_correct(cw, syn)) corrected_count++;
+      else                           uncorrectable_count++;
     end
 
     unpack_blocks(cw, blks_out);

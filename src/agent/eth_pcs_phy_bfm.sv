@@ -21,7 +21,29 @@ class eth_pcs_phy_bfm;
 
   // 协议完整性统计（记分板/测试 check_phase 汇总）
   int invalid_block_count;   // 解码非法块（坏同步头/未知块型）
-  int tx_underrun_count;     // 串行发送队列空（仅在数据已开始后计数）
+  int tx_underrun_count;     // FEC 模式串行队列空（FEC 无法按 bit 插补）
+
+  // 弹性 idle 统计：字时钟与位时钟允许独立（ppm 偏差），速率差由
+  // idle 块的插入/删除吸收 —— 真实 PHY 弹性缓冲的等效行为
+  int idle_ins_count;        // TX 队列见底时按 bit 流插入的 idle 块数
+  int idle_del_count;        // TX 队列超阈值时删除的 idle 块数
+
+  // 弹性垫与删除阈值：启动时预灌 PRIME_BLOCKS 个 idle 块（弹性 FIFO
+  // 半满启动），保证突发生产/均匀消费的相位差不会把队列打到 0 —— 队列
+  // 见底时插入会落在帧中间毁帧；删除阈值高于垫水位一段裕量，避免与
+  // 稳态深度打架
+  localparam int PRIME_BLOCKS    = 8;
+  localparam int IDLE_DEL_THRESH = 66 * (PRIME_BLOCKS + 2);
+
+  // FEC 模式删除阈值必须按码字粒度：码字整体（2112bit）突发入队，
+  // 阈值低于一个码字会导致"每码字后所有 idle 被删 -> fenc 集不满
+  // 32 块 -> 码字间断流发 0 -> 对端永不锁定"。取 2 码字深。
+  localparam int IDLE_DEL_THRESH_FEC = FEC_N * 2;
+
+  // 当前模式的删除阈值
+  function int del_thresh();
+    return cfg.fec_enable ? IDLE_DEL_THRESH_FEC : IDLE_DEL_THRESH;
+  endfunction
 
   // ---------------- 流水线子对象 ----------------
 
@@ -35,6 +57,7 @@ class eth_pcs_phy_bfm;
   protected logic     txbit_q[$];
   protected xgmii64_t rxpin_q[$];
   protected bit       tx_started;
+  protected bit       tx_primed;   // 弹性垫已预灌标志（复位后重灌）
 
   // RX 链路是否已完成块/码字对齐（test 在发流前等待，模拟 link-up）
   function bit rx_locked();
@@ -89,6 +112,13 @@ class eth_pcs_phy_bfm;
         continue;
       end
 
+      // 首拍先灌弹性垫（经扰码器，保持码流顺序连续）
+      if (!tx_primed) begin
+        repeat (PRIME_BLOCKS) push_idle_block();
+        idle_ins_count -= PRIME_BLOCKS;   // 垫不计入弹性插入统计
+        tx_primed = 1;
+      end
+
       begin
         xgmii64_t w;
         block66_t blk;
@@ -102,6 +132,23 @@ class eth_pcs_phy_bfm;
         end
 
         blk = pcs_codec::encode(w);
+
+        // 调试：前 N 个非 idle 发送块打印（加扰前），供与对端 VIP 比对
+        if (tx_dump_left > 0 &&
+            !(blk.sync == SYNC_CTRL && blk.payload == {56'h0, BT_CTRL})) begin
+          tx_dump_left--;
+          $display("[PCS_TX_BLK] @%0t sync=%b btf/first=%02x payload=%016x",
+                   $time, blk.sync, blk.payload[7:0], blk.payload);
+        end
+
+        // 弹性删除：字时钟快于位时钟/66 时队列会持续增长，删 idle 块
+        // 平衡速率（被删块不过扰码器，码流连续性不受影响）
+        if (blk.sync == SYNC_CTRL && blk.payload == {56'h0, BT_CTRL} &&
+            txbit_q.size() > del_thresh()) begin
+          idle_del_count++;
+          continue;
+        end
+
         blk.payload = scr.scramble(blk.payload);
 
         if (cfg.fec_enable) begin
@@ -110,19 +157,29 @@ class eth_pcs_phy_bfm;
             for (int i = 0; i < FEC_N; i++) txbit_q.push_back(cw[i]);
         end
         else begin
-          txbit_q.push_back(blk.sync[0]);
+          // 同步头发送顺序（802.3 惯例，与 svt VIP 实测一致）：数据块
+          // "01" 先发 0、控制块 "10" 先发 1，即先发 sync[1] 再 sync[0]
           txbit_q.push_back(blk.sync[1]);
+          txbit_q.push_back(blk.sync[0]);
           for (int i = 0; i < 64; i++) txbit_q.push_back(blk.payload[i]);
         end
       end
     end
   endtask
 
-  // 每 bit 时钟送出一个线路 bit。队列尚未产出首 bit 前发 0（对端处于
-  // 搜索态，无害）；数据开始后再空即为真实 underrun，计数暴露。
+  // 每 bit 时钟送出一个线路 bit。
+  // 弹性插入：位时钟快于字时钟×66 时队列会见底，非 FEC 模式现场加扰
+  // 一个 idle 块补入（真实 PHY 的 idle 插入），码流保持连续合法；
+  // FEC 模式无法按 bit 插补（须整码字），队列空计 underrun 并发 0。
   protected task tx_serial_loop();
     forever begin
       @(cfg.vif_serial.tx_cb);
+
+      if (txbit_q.size() == 0 && tx_started && !cfg.fec_enable) begin
+        $display("[PCS_TX_INS] @%0t 弹性插入（队列见底）", $time);
+        push_idle_block();
+      end
+
       if (txbit_q.size() > 0) begin
         cfg.vif_serial.tx_cb.tx_bit <= txbit_q.pop_front();
         tx_started = 1;
@@ -133,6 +190,19 @@ class eth_pcs_phy_bfm;
       end
     end
   endtask
+
+  // 现场生成一个加扰后的 idle 块压入 bit 队列（仅弹性插入路径使用；
+  // 与 tx_sample_loop 共用扰码器 —— 事件驱动下两者串行执行，压入顺序
+  // 即线路顺序，扰码状态保持连续）
+  protected function void push_idle_block();
+    block66_t b;
+    b.sync    = SYNC_CTRL;
+    b.payload = scr.scramble({56'h0, BT_CTRL});
+    txbit_q.push_back(b.sync[1]);
+    txbit_q.push_back(b.sync[0]);
+    for (int i = 0; i < 64; i++) txbit_q.push_back(b.payload[i]);
+    idle_ins_count++;
+  endfunction
 
   // ---------------- RX：串行 -> XGMII ----------------
 
@@ -162,11 +232,22 @@ class eth_pcs_phy_bfm;
     end
   endtask
 
+  // 调试：前 N 个非法块/非 idle 发送块打印，定位与对端 VIP 的块型差异
+  protected int invalid_dump_left = 40;
+  protected int tx_dump_left = 60;
+
   // 单块后处理：解扰 -> 解码 -> 双路递交
   protected function void deliver_block(block66_t blk);
     xgmii64_t w;
     blk.payload = descr.descramble(blk.payload);
-    if (!pcs_codec::decode(blk, w)) invalid_block_count++;
+    if (!pcs_codec::decode(blk, w)) begin
+      invalid_block_count++;
+      if (invalid_dump_left > 0) begin
+        invalid_dump_left--;
+        $display("[PCS_RX_INVALID] @%0t sync=%b btf=%02x payload=%016x",
+                 $time, blk.sync, blk.payload[7:0], blk.payload);
+      end
+    end
     void'(rx_words.try_put(w));
     rxpin_q.push_back(w);
   endfunction
@@ -199,6 +280,7 @@ class eth_pcs_phy_bfm;
     txbit_q.delete();
     rxpin_q.delete();
     tx_started = 0;
+    tx_primed  = 0;
   endfunction
 
 endclass

@@ -45,6 +45,7 @@
 | S 位置 | 仅 lane0（块型 0x78） | 64bit XGMII 下标准仅允许 lane0 起始 |
 | FEC | Clause 74 (2112,2080) | 与 VIP 10G FEC 测试同款，可交叉验证；error-trapping 解码可纠 ≤11bit burst |
 | 帧模型 | net_packet `packet` 类 | 复用 CRC/checksum/解析器/比较器 |
+| 时钟 | aip_clk（third_party/aip_core，vendored 1fs 精度）独立产生字/位时钟 | 高精度 + ppm/抖动/占空比可配；字/位时钟速率差由 BFM 弹性 idle 插入/删除吸收（真实 PHY 弹性缓冲行为） |
 | 校验策略 | 双侧 monitor + scoreboard 逐字节比帧；PCS 层校验非法块型/失锁/CRC | "协议完整性检查"落在块层 + 帧层两级 |
 
 ## 4. 目录约定
@@ -73,10 +74,44 @@ third_party/    net_packet（来自 10.11.10.59 ~/workspace/ryan/net_packet）
 
 ## 6. 验证清单
 
-- [ ] 单测：66b 编码→解码环回（随机帧、随机 IPG、各 T 位置）
-- [ ] 单测：扰码→解扰环回、种子无关性
-- [ ] 单测：FEC 编码→注错（burst ≤11bit）→解码纠正；>11bit 报不可纠
-- [ ] 单测：块同步在 bit-slip 后重新锁定
-- [ ] UVM：环回测试 N 帧零丢失零错帧（净荷 46B~9000B 扫描）
-- [ ] UVM：FEC 开/关两种模式环回
-- [ ] 阶段 2：svtVIP 交叉验证
+- [x] 单测：66b 编码→解码环回（随机帧、随机 IPG、各 T 位置）
+- [x] 单测：扰码→解扰环回
+- [x] 单测：FEC 编码→注错（burst ≤11bit）→解码纠正；>11bit 报不可纠
+- [x] 单测：块同步在任意相位/bit-slip 后锁定
+- [x] UVM：环回 FEC 开/关零丢失零错帧
+- [x] UVM：大流量 500 帧背靠背（stress / stress_fec）
+- [x] UVM：中途复位 → 重新 link-up → 复位后 200 帧全净（reset_recovery)
+- [x] UVM：链路扰动（反压等效）→ 撤扰重锁 → 200 帧全净（disturb）
+- [x] 阶段 2：svtVIP 双向交叉验证（XSBI_SERIAL，VIP 检查器通过）
+- [ ] FEC 与 VIP 互通（PN-2112 种子对齐后验证）
+
+## 7. 向 VIP 全能力对齐的扩展路线（已确认）
+
+方法与流程复用 10G 打通路径（loopback → 20000 帧 stress → 复位/扰动
+恢复 → svtVIP 交叉验证），按增量成本排序：
+
+1. **25G 单 lane**：同 64b/66b，换 25.78125G 时钟即可（近乎免费）；
+   5G（ETH_5G_BASER_*）同理。
+2. **40G/100G 多 lane**：新增 Clause 82 MLD 层（块轮转分发、对齐标记
+   插入/检出、每 lane 去偏），编解码/扰码层复用。
+3. **RS-FEC（Clause 91/108）**：GF(2^10) RS(528,514)，独立模块，
+   与 cl74 并列由 cfg 选择。
+4. **1G 及以下（GMII/SGMII）+ 2.5G（ETH_2PT5G_BASEX_*）**：8b/10b
+   独立编码栈，不与 64b/66b 共享。
+5. **AN/LT（Clause 73/72）**：真实 KR 建链流程，替换当前直接进
+   数据模式的捷径。
+
+速率族核查备忘：VIP 覆盖 10M~800G 标准速率 + FlexE/USXGMII/MACsec/PTP；
+**80G 不存在**（非 IEEE 标准速率），仅可经 2×40G 聚合或 FlexE 绑定实现。
+
+## 8. 对接 svtVIP 过程中修正的协议细节（重要备忘）
+
+1. **同步头发送顺序**：数据块 "01" 先发 0、控制块 "10" 先发 1
+   （即先发 sync[1]）。最初实现反了 —— 现象是两端各自环回都通、
+   idle 互通、帧全灭（数据块被对端当控制块，BTF 呈随机值）。
+2. **lane4 帧起始（块型 0x33）**：VIP 是 32bit XGMII 内核，帧起点在
+   lane0/lane4 间交替；只认 0x78 会按概率丢一半帧。
+3. **序集块（0x4b/0x55）**：VIP 在链路建立初期发 Remote Fault 序集，
+   不识别会计为非法块；解码为 SEQ(0x9c) 字符即可被帧装配器自然忽略。
+4. **源 MAC 单播**：随机 SA 置组播位会触发 VIP framing 检查器报错，
+   激励侧必须清 SA bit0。

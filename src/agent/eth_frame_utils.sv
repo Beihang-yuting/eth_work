@@ -127,11 +127,12 @@ class frame_assembler_c;
       bit           c = w.ctl[lane];
 
       if (!in_frame) begin
-        if (c && d == XGMII_START && lane == 0) begin
+        // S 允许出现在 lane0 或 lane4（对端 32bit XGMII 内核的两个合法起点）
+        if (c && d == XGMII_START && (lane == 0 || lane == 4)) begin
           in_frame = 1;
           line_bytes.delete();
         end
-        // 其余字符（IDLE/ERROR）在帧外直接忽略
+        // 其余字符（IDLE/ERROR/SEQ）在帧外直接忽略
       end
       else begin
         if (!c) begin

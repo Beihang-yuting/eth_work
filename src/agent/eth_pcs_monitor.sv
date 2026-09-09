@@ -59,11 +59,11 @@ class eth_pcs_monitor extends uvm_monitor;
   //（如注错测试预期非零），monitor 只负责如实曝光。
   virtual function void report_phase(uvm_phase phase);
     `uvm_info("PCS_STATS", $sformatf(
-      "frames=%0d crc_err=%0d preamble_err=%0d invalid_block=%0d slip=%0d fec_corr=%0d fec_uncorr=%0d tx_underrun=%0d",
+      "frames=%0d crc_err=%0d preamble_err=%0d invalid_block=%0d slip=%0d fec_corr=%0d fec_uncorr=%0d tx_underrun=%0d idle_ins=%0d idle_del=%0d",
       asm.frames_seen, asm.crc_err_count, asm.preamble_err_count,
       bfm.invalid_block_count, bfm.get_slip_count(),
       bfm.get_fec_corrected(), bfm.get_fec_uncorrectable(),
-      bfm.tx_underrun_count), UVM_LOW)
+      bfm.tx_underrun_count, bfm.idle_ins_count, bfm.idle_del_count), UVM_LOW)
   endfunction
 
   // 记分板/测试用查询接口

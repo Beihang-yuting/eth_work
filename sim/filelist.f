@@ -1,6 +1,7 @@
 // eth_work UVM 环回 TB 编译清单（相对 sim/ 目录；vcs 在 sim/ 下执行）
 // 顺序：接口 -> agent package -> TB package -> top
 +incdir+../src
++incdir+../third_party/aip_core
 +incdir+../third_party/net_packet/src
 +incdir+../third_party/net_packet/src/common
 +incdir+../third_party/net_packet/src/protocols
@@ -14,6 +15,7 @@
 +incdir+../third_party/net_packet/src/core
 
 ../src/agent/eth_pcs_if.sv
+../test/uvm/tb_ctrl_if.sv
 ../src/pkg/eth_pcs_pkg.sv
 ../test/uvm/eth_tb_pkg.sv
 ../test/uvm/top.sv

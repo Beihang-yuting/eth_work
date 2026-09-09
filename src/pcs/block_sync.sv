@@ -67,8 +67,9 @@ class block_sync_c;
     nbits++;
     if (nbits < 66) return 0;
 
-    // 集满一个候选块：线路顺序 bit0/bit1 为同步头
-    sync    = {shift[1], shift[0]};
+    // 集满一个候选块：线路顺序 bit0/bit1 为同步头。
+    // 发送侧先发 sync[1]（802.3 惯例，见 phy_bfm），故先到 bit 是 sync[1]
+    sync    = {shift[0], shift[1]};
     head_ok = (sync == SYNC_DATA) || (sync == SYNC_CTRL);
 
     if (!locked) begin

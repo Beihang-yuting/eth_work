@@ -14,9 +14,41 @@ BUILD    = build
 UNIT_SRCS = ../src/agent/eth_pcs_if.sv ../src/pkg/eth_pcs_pkg.sv \
             ../test/unit/tb_pcs_unit.sv
 
-.PHONY: all unit loopback fec clean
+.PHONY: all unit loopback fec stress stress_fec reset_recovery disturb clean
 
-all: unit loopback fec
+all: unit loopback fec stress stress_fec reset_recovery disturb
+
+# 环回可执行文件共用：一次编译多测试复用（VCS 自身增量编译）
+LOOPBACK_SIMV = $(BUILD)/loopback/simv
+
+.PHONY: loopback_simv
+loopback_simv:
+	mkdir -p $(BUILD)/loopback
+	$(VCS) -f filelist.f -top top \
+	  -o $(LOOPBACK_SIMV) -l $(BUILD)/loopback/compile.log
+
+# 大流量压力（1000 帧背靠背，FEC 关/开）
+stress: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/loopback/stress.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress.log
+
+stress_fec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_fec_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/loopback/stress_fec.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_fec.log
+
+# 中途复位恢复（段2 复位后 500 帧必须全净）
+reset_recovery: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_reset_recovery_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/loopback/reset.log
+	grep -q "段2(复位后) 完成 match=500" $(BUILD)/loopback/reset.log
+
+# 链路扰动（反压等效）恢复（段2 撤扰后 500 帧必须全净）
+disturb: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_disturb_recovery_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/loopback/disturb.log
+	grep -q "段2(恢复后) 完成 match=500" $(BUILD)/loopback/disturb.log
 
 unit:
 	mkdir -p $(BUILD)/unit
@@ -25,21 +57,28 @@ unit:
 	$(BUILD)/unit/simv -l $(BUILD)/unit/run.log
 	grep -q UNIT_TEST_PASS $(BUILD)/unit/run.log
 
-loopback:
-	mkdir -p $(BUILD)/loopback
-	$(VCS) -f filelist.f -top top \
-	  -o $(BUILD)/loopback/simv -l $(BUILD)/loopback/compile.log
-	$(BUILD)/loopback/simv +UVM_TESTNAME=eth_loopback_test \
+loopback: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
 	  -l $(BUILD)/loopback/run.log
 	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run.log
 
-fec:
-	mkdir -p $(BUILD)/fec
-	$(VCS) -f filelist.f -top top \
-	  -o $(BUILD)/fec/simv -l $(BUILD)/fec/compile.log
-	$(BUILD)/fec/simv +UVM_TESTNAME=eth_loopback_fec_test \
-	  -l $(BUILD)/fec/run.log
-	grep -q "match=20 mismatch=0" $(BUILD)/fec/run.log
+fec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_fec_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/loopback/fec.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/fec.log
+
+# 阶段 2：与 svt ethernet VIP 交叉验证（需 DESIGNWARE_HOME 与
+# dw_vip_setup 生成的 ETH_SVT_DESIGN，见 filelist_svt.f 头注）
+ETH_SVT_DESIGN ?= /home/ubuntu/ryan/eth_svt_design
+
+svt:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
+	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/svt/run.log
+	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run.log
 
 clean:
 	rm -rf $(BUILD) csrc simv* ucli.key vc_hdrs.h

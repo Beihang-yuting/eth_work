@@ -120,6 +120,36 @@ class pcs_codec;
       return 1;
     end
 
+    // 帧起始于 lane4（32bit XGMII 内核对端会交替使用 lane0/lane4 起点）：
+    // C0..C3 视为 IDLE，S 落 lane4，D5..D7 取块尾 24bit
+    if (bt == BT_START4) begin
+      w_out = xgmii_all_idle();
+      w_out.ctl = 8'b0001_1111;
+      w_out.data[39:32] = XGMII_START;
+      w_out.data[63:40] = b.payload[63:40];
+      return 1;
+    end
+
+    // 序集块（Local/Remote Fault 等）：O 码统一还原为 SEQ 起始字符，
+    // 帧装配器在帧外自然忽略 —— 只需保证不误判为非法块
+    if (bt == BT_OSET0) begin
+      w_out = xgmii_all_idle();
+      w_out.ctl = 8'b1111_0001;
+      w_out.data[7:0]   = XGMII_SEQ;
+      w_out.data[31:8]  = b.payload[31:8];
+      return 1;
+    end
+
+    if (bt == BT_OSET2) begin
+      w_out = xgmii_all_idle();
+      w_out.ctl = 8'b0001_0001;
+      w_out.data[7:0]   = XGMII_SEQ;
+      w_out.data[31:8]  = b.payload[31:8];
+      w_out.data[39:32] = XGMII_SEQ;
+      w_out.data[63:40] = b.payload[63:40];
+      return 1;
+    end
+
     t_lane = term_lane(bt);
     if (t_lane >= 0) begin
       w_out = xgmii_all_idle();

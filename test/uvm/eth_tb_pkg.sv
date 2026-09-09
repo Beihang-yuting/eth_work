@@ -52,6 +52,10 @@ package eth_tb_pkg;
         t.data = pkt.raw_data;
         while (t.data.size() < 60) t.data.push_back(8'h00);
 
+        // 源 MAC 强制单播：随机地址可能置组播位（SA[0].bit0），
+        // 802.3 禁止组播源地址，对端 framing 检查器会报错
+        if (t.data.size() > 6) t.data[6] &= 8'hfe;
+
         start_item(t);
         finish_item(t);
       end
@@ -78,6 +82,27 @@ package eth_tb_pkg;
     int match_count;
     int mismatch_count;
 
+    // 宽松模式（链路扰动窗口用）：容忍丢帧与坏帧，只对"内容干净却与
+    // 任何期望都不匹配"的帧计 mismatch —— 扰动只该毁帧，不该造出新帧
+    bit lenient = 0;
+    int lost_count;        // 宽松模式下按序跳过的期望帧数
+    int disturbed_bad;     // 宽松模式下收到的坏帧（CRC/preamble 脏）
+
+    // 段间清零：复位/扰动测试在严格段开始前调用
+    function void clear();
+      exp_q.delete();
+      match_count    = 0;
+      mismatch_count = 0;
+      lost_count     = 0;
+      disturbed_bad  = 0;
+    endfunction
+
+    // 结算未到达的期望帧（宽松段收尾时调用，全部计入 lost）
+    function void flush_pending_as_lost();
+      lost_count += exp_q.size();
+      exp_q.delete();
+    endfunction
+
     function new(string name, uvm_component parent);
       super.new(name, parent);
       exp_imp = new("exp_imp", this);
@@ -92,8 +117,32 @@ package eth_tb_pkg;
 
     // 实际帧到达：与队首期望比对。接收侧 CRC/preamble 必须干净 ——
     // 这正是"协议完整性"的帧级判据。
+    // 宽松模式：坏帧计 disturbed_bad；干净帧向后搜索期望队列，跳过的
+    // 期望计 lost（扰动毁掉的在途帧），仍无匹配才算 mismatch。
     function void write_act(eth_frame_txn t);
       eth_frame_txn e;
+
+      if (lenient) begin
+        int idx = -1;
+
+        if (!t.crc_ok || !t.preamble_ok) begin
+          disturbed_bad++;
+          return;
+        end
+        foreach (exp_q[i])
+          if (exp_q[i].compare(t)) begin idx = i; break; end
+        if (idx >= 0) begin
+          lost_count += idx;
+          repeat (idx + 1) void'(exp_q.pop_front());
+          match_count++;
+        end
+        else begin
+          `uvm_error("SB", $sformatf("宽松段出现无来源干净帧: %s",
+                                     t.convert2string()))
+          mismatch_count++;
+        end
+        return;
+      end
 
       if (exp_q.size() == 0) begin
         `uvm_error("SB", $sformatf("多余接收帧: %s", t.convert2string()))
@@ -180,9 +229,12 @@ package eth_tb_pkg;
     // 子类翻转此开关复用全部装配逻辑
     protected bit fec_mode = 0;
 
-    // 等待接收完成的仿真时限（bit 时钟 100ps；FEC 锁定与流水线延迟
-    // 需要数十万 bit 拍，留足裕量）
+    // 流量规模与时限（子类按场景放大；大流量为默认要求，冒烟基类保守）
+    protected int  num_frames  = 20;
     protected time run_timeout = 2ms;
+
+    // TB 控制接口（复位/扰动测试用；普通测试可为 null）
+    protected virtual tb_ctrl_if vif_ctrl;
 
     function new(string name, uvm_component parent);
       super.new(name, parent);
@@ -216,36 +268,52 @@ package eth_tb_pkg;
       uvm_config_db#(eth_pcs_cfg)::set(this, "env", "cfg_a", cfg_a);
       uvm_config_db#(eth_pcs_cfg)::set(this, "env", "cfg_b", cfg_b);
 
+      void'(uvm_config_db#(virtual tb_ctrl_if)::get(this, "", "vif_ctrl",
+                                                    vif_ctrl));
+
       env = eth_loopback_env::type_id::create("env", this);
     endfunction
 
-    // 发流后等记分板收齐或超时。超时按失败处理 —— 挂死型缺陷（失锁、
-    // 流水线断流）必须显式暴露而不是靠全局 timeout 掩盖。
-    virtual task run_phase(uvm_phase phase);
-      eth_loopback_seq seq = eth_loopback_seq::type_id::create("seq");
-
-      phase.raise_objection(this);
-
-      // link-up：双向对齐锁定 + 1us 裕量（解扰器自同步、流水线冲净），
-      // 否则锁定期内发出的帧必然丢失
+    // 等待双向链路锁定 + 解扰自同步裕量（link-up；复位后亦复用）
+    protected task wait_link_up();
       while (!(env.agent_a.bfm.rx_locked() && env.agent_b.bfm.rx_locked()))
         #100ns;
       #1us;
+    endtask
 
+    // 发 n 帧并等待记分板收齐（或超时报错）。base 为当前已结算帧数，
+    // 分段测试第二段传入 0 前需先 sb.clear()。
+    protected task run_traffic(int n, time tmo);
+      eth_loopback_seq seq = eth_loopback_seq::type_id::create("seq");
+      int base = env.sb.match_count + env.sb.mismatch_count + env.sb.lost_count;
+
+      seq.num_frames = n;
       seq.start(env.agent_a.sqr);
 
       fork begin
         fork
-          wait (env.sb.match_count + env.sb.mismatch_count >= seq.num_frames);
+          wait (env.sb.match_count + env.sb.mismatch_count +
+                env.sb.lost_count >= base + n);
           begin
-            #run_timeout;
+            #tmo;
             `uvm_error("TEST", $sformatf(
-              "超时: match=%0d mismatch=%0d (期望 %0d 帧)",
-              env.sb.match_count, env.sb.mismatch_count, seq.num_frames))
+              "超时: match=%0d mismatch=%0d lost=%0d (期望 %0d 帧)",
+              env.sb.match_count, env.sb.mismatch_count,
+              env.sb.lost_count, base + n))
           end
         join_any
         disable fork;
       end join
+    endtask
+
+    // 发流后等记分板收齐或超时。超时按失败处理 —— 挂死型缺陷（失锁、
+    // 流水线断流）必须显式暴露而不是靠全局 timeout 掩盖。
+    virtual task run_phase(uvm_phase phase);
+      phase.raise_objection(this);
+
+      // link-up：双向对齐锁定 + 裕量，否则锁定期内发出的帧必然丢失
+      wait_link_up();
+      run_traffic(num_frames, run_timeout);
 
       phase.drop_objection(this);
     endtask
@@ -261,6 +329,154 @@ package eth_tb_pkg;
       super.new(name, parent);
       fec_mode = 1;
     endfunction
+
+  endclass
+
+  // ---------------- 大流量压力测试 ----------------
+
+  // 1000 帧背靠背随机模板/长度（大流量标准）；判据与冒烟相同：
+  // 零丢零错，另在 check 里核对 tx_underrun==0（速率匹配无断流）
+  class eth_stress_test extends eth_loopback_test;
+
+    `uvm_component_utils(eth_stress_test)
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      num_frames  = 1000;
+      run_timeout = 20ms;
+    endfunction
+
+    virtual function void check_phase(uvm_phase phase);
+      super.check_phase(phase);
+      if (env.agent_a.bfm.tx_underrun_count != 0)
+        `uvm_error("TEST", $sformatf("发送断流 %0d 次",
+                                     env.agent_a.bfm.tx_underrun_count))
+    endfunction
+
+  endclass
+
+  // FEC 使能大流量
+  class eth_stress_fec_test extends eth_stress_test;
+
+    `uvm_component_utils(eth_stress_fec_test)
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      fec_mode = 1;
+    endfunction
+
+  endclass
+
+  // ---------------- 中途复位恢复测试 ----------------
+
+  // 段1 大流量收齐 -> 中途复位 -> 重新 link-up -> 段2 大流量必须
+  // 零丢零错 —— 验证复位清态彻底、复位后链路与流量完全正常
+  class eth_reset_recovery_test extends eth_loopback_test;
+
+    `uvm_component_utils(eth_reset_recovery_test)
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      num_frames  = 500;     // 每段 500，全测试合计 1000 帧
+      run_timeout = 100ms;
+    endfunction
+
+    virtual task run_phase(uvm_phase phase);
+      phase.raise_objection(this);
+
+      if (vif_ctrl == null)
+        `uvm_fatal("TEST", "复位测试需要 top 提供 tb_ctrl_if")
+
+      // 段1：正常大流量
+      wait_link_up();
+      run_traffic(num_frames, run_timeout);
+      `uvm_info("TEST", $sformatf("段1 完成 match=%0d", env.sb.match_count),
+                UVM_LOW)
+
+      // 中途复位：请求脉冲并等待 top 完成握手
+      vif_ctrl.reset_req = 1;
+      wait (vif_ctrl.reset_req == 0);
+
+      // 复位丢弃在途状态；清零记分板后重新 link-up
+      env.sb.clear();
+      wait_link_up();
+
+      // 段2：复位后的流量必须完全干净
+      run_traffic(num_frames, run_timeout);
+      `uvm_info("TEST", $sformatf("段2(复位后) 完成 match=%0d",
+                                  env.sb.match_count), UVM_LOW)
+
+      phase.drop_objection(this);
+    endtask
+
+  endclass
+
+  // ---------------- 链路扰动（反压）恢复测试 ----------------
+
+  // 段1 大流量进行中注入串行线误码窗口（等效链路反压/瞬断）：
+  // 宽松比对 —— 允许扰动毁帧，不允许凭空出帧；撤扰后段2 严格
+  // 零丢零错 —— 验证失锁重锁与流量恢复，无卡死。
+  class eth_disturb_recovery_test extends eth_loopback_test;
+
+    `uvm_component_utils(eth_disturb_recovery_test)
+
+    // 扰动窗口时长（覆盖多个 66b 块与锁定窗口，足以造成失锁）
+    protected time disturb_len = 20us;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      num_frames  = 500;     // 每段 500，全测试合计 1000 帧
+      run_timeout = 100ms;
+    endfunction
+
+    virtual task run_phase(uvm_phase phase);
+      phase.raise_objection(this);
+
+      if (vif_ctrl == null)
+        `uvm_fatal("TEST", "扰动测试需要 top 提供 tb_ctrl_if")
+
+      wait_link_up();
+
+      // 段1：宽松模式发流，流量中段注入扰动
+      env.sb.lenient = 1;
+      fork
+        begin
+          eth_loopback_seq seq = eth_loopback_seq::type_id::create("seq1");
+          seq.num_frames = num_frames;
+          seq.start(env.agent_a.sqr);
+        end
+        begin
+          // 等流量跑起来再扰动，确保扰动落在帧中间
+          wait (env.sb.match_count > 10);
+          vif_ctrl.err_inject = 1;
+          #disturb_len;
+          vif_ctrl.err_inject = 0;
+          `uvm_info("TEST", "扰动窗口结束", UVM_LOW)
+        end
+      join
+
+      // 排空在途，未到帧全部按扰动损失结算
+      #100us;
+      env.sb.flush_pending_as_lost();
+      `uvm_info("TEST", $sformatf(
+        "段1(扰动) match=%0d lost=%0d bad=%0d mismatch=%0d",
+        env.sb.match_count, env.sb.lost_count, env.sb.disturbed_bad,
+        env.sb.mismatch_count), UVM_LOW)
+      if (env.sb.mismatch_count != 0)
+        `uvm_error("TEST", "扰动段出现凭空帧/错配帧")
+
+      // 恢复检查：撤扰后必须能重新锁定
+      env.sb.clear();
+      env.sb.lenient = 0;
+      wait_link_up();
+
+      // 段2：恢复后的流量必须完全干净
+      run_traffic(num_frames, run_timeout);
+      `uvm_info("TEST", $sformatf("段2(恢复后) 完成 match=%0d",
+                                  env.sb.match_count), UVM_LOW)
+
+      phase.drop_objection(this);
+    endtask
 
   endclass
 

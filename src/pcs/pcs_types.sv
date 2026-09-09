@@ -24,6 +24,9 @@ localparam byte unsigned XGMII_TERM  = 8'hfd;
 // 错误指示字符：链路层向上传播错误
 localparam byte unsigned XGMII_ERROR = 8'hfe;
 
+// 序集起始字符（Sequence ordered set，如 Local/Remote Fault）
+localparam byte unsigned XGMII_SEQ   = 8'h9c;
+
 // ---------------- 66b 块同步头（IEEE 802.3 49.2.4.3） ----------------
 
 // 数据块同步头：8 字节全为数据
@@ -39,6 +42,13 @@ localparam byte unsigned BT_CTRL     = 8'h1e;
 
 // 帧起始于 lane0：S + D1..D7
 localparam byte unsigned BT_START0   = 8'h78;
+
+// 帧起始于 lane4：C0..C3 + S + D5..D7（32bit XGMII 内核的另一合法起点）
+localparam byte unsigned BT_START4   = 8'h33;
+
+// 序集块：O0 + C4..C7 / O0 + O4（Local/Remote Fault 等经由这两种块传输）
+localparam byte unsigned BT_OSET0    = 8'h4b;
+localparam byte unsigned BT_OSET2    = 8'h55;
 
 // 帧终止于 lane k：D0..D(k-1) + T + 其后 C 码
 localparam byte unsigned BT_TERM0    = 8'h87;
