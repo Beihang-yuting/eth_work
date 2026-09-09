@@ -15,39 +15,21 @@
 
 `timescale 1ps/1ps
 
+`include "agent/eth_pcs_macros.svh"
+
 module top;
 
   import uvm_pkg::*;
   import eth_tb_pkg::*;
 
-  // 时钟：aip_clk 独立产生字时钟 156.25MHz 与位时钟 10.3125GHz。
-  // 不再要求严格 66:1 —— 字时钟故意加 +50ppm，速率差由 BFM 弹性
-  // idle 插入/删除吸收（真实 PHY 行为），顺带常态化验证弹性路径。
-  aip_clk_if word_clk_if ();
-  aip_clk_if bit_clk_if ();
+  // 时钟：集成宏一行生成 sys_word_clk / sys_bit_clk（含 +SPEED 模式
+  // 选择与 +100ppm 删除主导域约定，见 eth_pcs_macros.svh）
+  `eth_pcs_clk_gen(sys)
 
-  aip_clk word_clk_gen;
-  aip_clk bit_clk_gen;
-
-  wire word_clk = word_clk_if.clk;
-  wire bit_clk  = bit_clk_if.clk;
+  wire word_clk = sys_word_clk;
+  wire bit_clk  = sys_bit_clk;
 
   logic rst_n = 0;
-
-  initial begin
-    word_clk_gen = new("word_clk", word_clk_if);
-    // +100ppm：确保字时钟生产速率严格大于位时钟消耗（含 fs 舍入误差），
-    // BFM 工作在"删除主导域"—— 删除只发生在帧间 idle，永不伤帧；
-    // 插入路径仅作启动瞬态兜底
-    word_clk_gen.set_freq(156.25e6);
-    word_clk_gen.set_ppm(100);
-
-    bit_clk_gen = new("bit_clk", bit_clk_if);
-    bit_clk_gen.set_freq(10.3125e9);
-
-    word_clk_gen.start();
-    bit_clk_gen.start();
-  end
 
   // TB 控制接口：test 经此请求中途复位 / 注入链路误码
   tb_ctrl_if ctrl ();

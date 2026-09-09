@@ -74,6 +74,36 @@ fec: loopback_simv
 	  -l $(BUILD)/loopback/fec.log
 	grep -q "match=20 mismatch=0" $(BUILD)/loopback/fec.log
 
+# 25G / 5G 单 lane（同一编译产物，+SPEED 换时钟；流程同 10G）
+loopback_25g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g -l $(BUILD)/loopback/run_25g.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_25g.log
+
+stress_25g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g -l $(BUILD)/loopback/stress_25g.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_25g.log
+
+multi_reset_25g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g -l $(BUILD)/loopback/multi_reset_25g.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_25g.log
+
+stress_5g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=5g -l $(BUILD)/loopback/stress_5g.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_5g.log
+
+svt_25g:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
+	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g -l $(BUILD)/svt/run_25g.log
+	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_25g.log
+
 # 阶段 2：与 svt ethernet VIP 交叉验证（需 DESIGNWARE_HOME 与
 # dw_vip_setup 生成的 ETH_SVT_DESIGN，见 filelist_svt.f 头注）
 ETH_SVT_DESIGN ?= /home/ubuntu/ryan/eth_svt_design

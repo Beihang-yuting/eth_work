@@ -39,6 +39,11 @@ package eth_svt_cross_pkg;
       interface_select = ETH_XSBI_SERIAL;
     endfunction
 
+    // 25G 单 lane 串行（同 64b/66b 体系，仅时钟不同）
+    function void set_25g_cfg();
+      interface_select = ETH_25G_SERIAL;
+    endfunction
+
   endclass
 
   // ---------------- 交叉记分板 ----------------
@@ -214,7 +219,15 @@ package eth_svt_cross_pkg;
         `uvm_fatal("CFG", "test 未取得自研 agent 接口句柄")
 
       vip_cfg = cross_svt_cfg::type_id::create("vip_cfg");
-      vip_cfg.set_kr_cfg();
+
+      // +SPEED=25g 切 25G 串行模式（与 top_svt 的时钟选择同一 plusarg）
+      begin
+        string speed = "10g";
+        void'($value$plusargs("SPEED=%s", speed));
+        if (speed == "25g") vip_cfg.set_25g_cfg();
+        else                vip_cfg.set_kr_cfg();
+      end
+
       vip_cfg.mac_address[0] = 48'h000000004455;
 
       phy_cfg = eth_pcs_cfg::type_id::create("phy_cfg");
@@ -239,7 +252,23 @@ package eth_svt_cross_pkg;
 
       phase.raise_objection(this);
 
-      while (!env.phy_agent.bfm.rx_locked()) #100ns;
+      // 等锁加诊断与上限：每 20us 打印一次对齐状态（slip/invalid），
+      // 500us 仍未锁按 FATAL 终止 —— 避免高事件密度速率下磨到全局
+      // 超时（等价挂死），且现场数据直接指向失锁原因
+      begin
+        int waited_us = 0;
+        while (!env.phy_agent.bfm.rx_locked()) begin
+          #20us;
+          waited_us += 20;
+          `uvm_info("TEST", $sformatf(
+            "等锁 %0dus: locked=%0b slip=%0d invalid=%0d",
+            waited_us, env.phy_agent.bfm.rx_locked(),
+            env.phy_agent.bfm.get_slip_count(),
+            env.phy_agent.bfm.invalid_block_count), UVM_LOW)
+          if (waited_us >= 500)
+            `uvm_fatal("TEST", "500us 未锁定 —— 对端码流不兼容或未起流")
+        end
+      end
       #5us;
 
       fork

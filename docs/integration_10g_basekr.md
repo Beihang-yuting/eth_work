@@ -70,6 +70,37 @@ module my_top;
 endmodule
 ```
 
+### 3.1 宏捷径（推荐）
+
+`src/agent/eth_pcs_macros.svh` 封装了上述全部样板，top 层五个宏完成集成：
+
+```systemverilog
+`include "aip_log.sv"
+`include "aip_time.sv"
+`include "aip_clk.sv"
+`timescale 1ps/1ps
+`include "agent/eth_pcs_macros.svh"
+
+module my_top;
+  import uvm_pkg::*;  import eth_pcs_pkg::*;
+
+  `eth_pcs_clk_gen(sys)                       // sys_word_clk/sys_bit_clk，
+                                              // +SPEED=10g|25g|5g 选速率
+  `eth_pcs_reset_gen(rst_n, sys_word_clk)     // 上电复位
+  `eth_pcs_port(p, sys_word_clk, sys_bit_clk, rst_n)  // p_xgmii + p_serial
+
+  `eth_pcs_connect_svt(p, mac_ethernet_if)    // 对接 svt VIP（serial 系）
+  // 或双 agent 环回：`eth_pcs_port(q, ...) + `eth_pcs_connect(p, q)
+
+  `eth_pcs_vifs(p)                            // config_db 下发
+                                              // （键 vif_xgmii_p/vif_serial_p）
+  initial run_test();
+endmodule
+```
+
+参考实现：`test/svt/top_svt.sv`（connect_svt/port/vifs）、
+`test/uvm/top.sv`（clk_gen）。
+
 ## 4. UVM 侧集成
 
 ```systemverilog

@@ -10,8 +10,10 @@ aip_clk（vendored 于 third_party/aip_core，精度提到 1fs），字/位时�
 
 文档索引：
 - 设计：`docs/architecture.md`（含扩展路线图与 VIP 对接备忘）
-- 集成/使用（每模式一份）：`docs/integration_10g_basekr.md`
-- 可跑示例（每模式一份）：`examples/10g_basekr_loopback/README.md`
+- 集成/使用（每模式一份）：`docs/integration_10g_basekr.md`、
+  `docs/integration_25g_5g.md`
+- 可跑示例（每模式一份）：`examples/10g_basekr_loopback/`、
+  `examples/25g_loopback/`
 
 ## 运行（10.11.10.53，需 VCS 环境）
 
