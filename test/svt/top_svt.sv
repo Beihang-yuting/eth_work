@@ -33,14 +33,16 @@ module top_svt;
   // 接线半部在接口实例之后；此前只接子集导致 25G 模式 TX 恒值假死
   `eth_pcs_svt_clock_gen(v)
 
-  // +SPEED=25g 切到 ETH_25G_SERIAL（默认 10g/BASE-KR）。时钟起振前由
-  // initial 设定；test 侧读同一 plusarg 选 VIP cfg
+  // +SPEED=25g/40g 切模式（默认 10g/BASE-KR）。时钟起振前由 initial
+  // 设定；test 侧读同一 plusarg 选 VIP cfg
   bit use_25g = 0;
+  bit use_40g = 0;
 
   initial begin
     string speed = "10g";
     void'($value$plusargs("SPEED=%s", speed));
     use_25g = (speed == "25g");
+    use_40g = (speed == "40g");
   end
 
   // 自研侧字时钟：aip_clk 独立产生 156.25MHz；与 VIP 串行位时钟的微小
@@ -56,7 +58,11 @@ module top_svt;
   initial begin
     our_word_clk_gen = new("our_word_clk", our_word_clk_if);
     #1;   // 等 use_25g 决议
-    our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0);
+    if (use_40g)
+      // 40G：4 lane 合流字率，扣标准 AM 间隔 16384 的带宽开销
+      our_word_clk_gen.set_freq(4.0 * 10.3125e9 / 66.0 * 16383.0 / 16384.0);
+    else
+      our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0);
     // +100ppm：删除主导域（生产恒盈余，弹性删除只删帧间 idle），
     // 覆盖 fs 舍入与 VIP 位钟的微小速率差
     our_word_clk_gen.set_ppm(100);
@@ -96,12 +102,26 @@ module top_svt;
   // 集成宏：一行实例化 agent 接口对（p_xgmii / p_serial）
   `eth_pcs_port(p, our_word_clk, our_serial_clk, our_rst_n)
 
+  // 40G 模式的 4 条串行 lane（位钟同 BASE-R 10.3125G；其余模式闲置）
+  serial_if p_serial_l [4] (v_serial_baser_clk, our_rst_n);
+
   // ---------------- 串行链路交叉连接 ----------------
 
   // VIP MAC 的接收线 = 我方发送；我方接收 = VIP MAC 的发送。
-  // XSBI_SERIAL 模式只用 lane bit0，其余位清零。
-  // 集成宏：一行完成与 VIP serial 系接口的双向对接（lane bit0 约定内置）
-  `eth_pcs_connect_svt(p, mac_ethernet_if)
+  // 单 lane（10G/25G）走 lane bit0；40G 走 tx_lane[3:0]/rx_lane[3:0]。
+  // rx_lane 按模式 mux（不能双驱动，故不复用 connect_svt 宏）
+  assign mac_ethernet_if.rx_lane =
+    use_40g ? {'0, p_serial_l[3].tx_bit, p_serial_l[2].tx_bit,
+                    p_serial_l[1].tx_bit, p_serial_l[0].tx_bit}
+            : {'0, p_serial.tx_bit};
+  assign p_serial.rx_bit = mac_ethernet_if.tx_lane[0];
+
+  for (genvar gi = 0; gi < 4; gi++) begin : g_l40
+    assign p_serial_l[gi].rx_bit = mac_ethernet_if.tx_lane[gi];
+
+    initial uvm_config_db#(virtual serial_if)::set(null, "uvm_test_top",
+      $sformatf("vif_serial_p_l%0d", gi), p_serial_l[gi]);
+  end
 
   // ---------------- UVM 启动 ----------------
 

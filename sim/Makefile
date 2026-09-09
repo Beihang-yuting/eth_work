@@ -126,6 +126,15 @@ multi_reset_40g: loopback_40g_simv
 	  +SPEED=40g -l $(BUILD)/loopback40g/multi_reset.log
 	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback40g/multi_reset.log
 
+svt_40g:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
+	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g -l $(BUILD)/svt/run_40g.log
+	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_40g.log
+
 # 阶段 2：与 svt ethernet VIP 交叉验证（需 DESIGNWARE_HOME 与
 # dw_vip_setup 生成的 ETH_SVT_DESIGN，见 filelist_svt.f 头注）
 ETH_SVT_DESIGN ?= /home/ubuntu/ryan/eth_svt_design

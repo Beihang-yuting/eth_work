@@ -301,6 +301,7 @@ module tb_pcs_unit;
 
     check("mld: aligned", rx.is_aligned());
     check("mld: no realign", rx.realign_count == 0);
+    check("mld: bip clean", rx.bip_err_count == 0);
     check("mld: got count", got.size() == sent.size());
     foreach (got[i]) check("mld: block order", got[i] == sent[i]);
     $display("[OK] mld distribute/deskew/reassemble x%0d (skew+lane-swap)",
