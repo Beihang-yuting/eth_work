@@ -36,12 +36,25 @@ cd sim
 make loopback_40g      # 40G 环回冒烟
 make stress_40g        # 1000 帧大流量
 make multi_reset_40g   # 5 轮中途复位恢复
+make svt_40g           # svt VIP 双向交叉（A: VIP->我方 500 帧，B: 我方->VIP 1000 帧）
 ```
 
 判读同 10G；`rx_locked()` 在多 lane 模式表示 MLD 全 lane 对齐完成。
 
-## 5. 已知限制（TODO）
+## 5. svt VIP 交叉要点（40G XLSBI）
 
-- AM 的 BIP3/BIP7 置常值，未做 BIP 误码统计。
+- **AM 间隔必须两侧一致，且受 VIP 能力约束**：VIP `xlsbi_40g_align_timer`
+  默认 64，合理约束仅 {64,128,256} —— 标准 16384 超出 VIP 支持范围。
+  交叉环境两侧统一 64（`set_40g_cfg` 显式配 VIP，phy `am_spacing=64`，
+  top_svt 字钟扣减 63/64）。
+- 不一致的后果（曾踩坑）：VIP RX 每周期报 invalid_align/bip，累计 ~21
+  周期后 VIP 内部复位并扰乱其 TX，方向 A 出现固定时刻的 76 块乱码与
+  len=0 脏帧；report catcher 降级只能压报告压不住 VIP 内部状态。
+- BIP-8 按 IEEE 表 82-4 实现（TX 生成 + RX 校验），与 VIP checker 互通。
+- mld_rx 对齐后 AM 间隔自检为学习式（首个完整间隔作基准），兼容对端对
+  spacing 是否含 AM 的不同计数约定；偏离即整体重对齐。
+
+## 6. 已知限制（TODO）
+
 - MLD 与 Clause 74 FEC 叠加未实现。
-- 100G（20 逻辑 lane）待参数化扩展；svt VIP 40G 交叉验证待做。
+- 100G（20 逻辑 lane）待参数化扩展。

@@ -129,8 +129,11 @@ class mld_rx_c;
   // 各物理 lane 的 BIP-8 累计（含上一 AM 起的全部块）
   protected logic [7:0] bip_rx[MLD_MAX_LANES];
 
-  // 各物理 lane 距上个 AM 的数据块计数（对齐态周期自检用）
+  // 各物理 lane 距上个 AM 的数据块计数（对齐态周期自检用）。
+  // 期望间隔在对齐后从首个完整间隔学习（learned_gap）：不同实现对
+  // am_spacing 的计数约定不同（是否含 AM 本身），学习式两者都兼容。
   protected int since_am[MLD_MAX_LANES];
+  protected int learned_gap;
 
   function new(int lanes, int spacing);
     num_lanes  = lanes;
@@ -144,6 +147,7 @@ class mld_rx_c;
     foreach (bip_rx[i]) bip_rx[i] = '0;
     foreach (am_seen[i]) am_seen[i] = 0;
     foreach (since_am[i]) since_am[i] = 0;
+    learned_gap = -1;
     aligned = 0;
     rr      = 0;
   endfunction
@@ -172,21 +176,29 @@ class mld_rx_c;
       if (phys_of_logical[l] != phys) begin
         if (phys_of_logical[l] != -1 || lane_map_of(phys) != -1) begin
           realign_count++;
+          $display("[MLD_REALIGN] @%0t lane-conflict phys=%0d logical=%0d",
+                   $time, phys, l);
           reset();
         end
         phys_of_logical[l] = phys;
       end
 
-      // 对齐态周期自检：两 AM 间数据块数必须等于 spacing-1；不符说明
-      // 该 lane 曾滑块，重组已错位且无法自愈 —— 整体重对齐（在途块
-      // 丢弃，由上层 lenient/计数暴露）。
-      if (aligned && since_am[phys] != am_spacing - 1) begin
-        realign_count++;
-        reset();
-        phys_of_logical[l] = phys;
-        bip_rx[phys] = mld_bip_acc('0, b);
-        am_seen[phys] = 1;
-        return;
+      // 对齐态周期自检：两 AM 间数据块数应恒定（首个完整间隔学得基
+      // 准）；偏离说明该 lane 曾滑块，重组已错位且无法自愈 —— 整体
+      // 重对齐（在途块丢弃，由上层 lenient/计数暴露）。
+      if (aligned) begin
+        if (learned_gap < 0) begin
+          learned_gap = since_am[phys];
+        end else if (since_am[phys] != learned_gap) begin
+          realign_count++;
+          $display("[MLD_REALIGN] @%0t gap-mismatch phys=%0d gap=%0d learned=%0d",
+                   $time, phys, since_am[phys], learned_gap);
+          reset();
+          phys_of_logical[l] = phys;
+          bip_rx[phys] = mld_bip_acc('0, b);
+          am_seen[phys] = 1;
+          return;
+        end
       end
       since_am[phys] = 0;
 

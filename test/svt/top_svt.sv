@@ -59,8 +59,9 @@ module top_svt;
     our_word_clk_gen = new("our_word_clk", our_word_clk_if);
     #1;   // 等 use_25g 决议
     if (use_40g)
-      // 40G：4 lane 合流字率，扣标准 AM 间隔 16384 的带宽开销
-      our_word_clk_gen.set_freq(4.0 * 10.3125e9 / 66.0 * 16383.0 / 16384.0);
+      // 40G：4 lane 合流字率，扣 AM 间隔 64（与 VIP align_timer 一致）
+      // 的带宽开销
+      our_word_clk_gen.set_freq(4.0 * 10.3125e9 / 66.0 * 63.0 / 64.0);
     else
       our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0);
     // +100ppm：删除主导域（生产恒盈余，弹性删除只删帧间 idle），
