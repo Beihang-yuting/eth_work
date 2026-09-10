@@ -123,6 +123,8 @@ endclass
   `<name>_xgmii`）；agent#1 与 agent#2 串行交叉（`eth_pcs_connect`，
   40G 用 `eth_pcs_mld_connect`）。即 test/uvm/top.sv 环回拓扑把一端的
   XGMII 让位给 DUT。
+  **agent#2 的 XGMII 悬空即可**（BFM 对未驱动的 XGMII 按全 idle 处理）：
+  它不是第二套环境，只是串行侧的"报文打包器"，成本一个实例 + 两根串行线。
 - **发包（打向 DUT）**：在 **agent#2** 的 sequencer 上跑 2.1 的序列。
   报文经 agent#2 编码 → 串行 → agent#1 解码 → XGMII → 进 DUT MAC RX。
   DUT MAC 只见标准 XGMII 码流，与接真 PHY 无差别。
@@ -154,7 +156,16 @@ VIP 的位置换成 DUT：
   3. 若 DUT 的 KR 口不能旁路自协商，需先完成 AN/LT（cl73/72）建链——
      本仓库该项在做，未完成前需 DUT 配成强制速率模式（force mode）。
 
-### 2.4 两种形态怎么选
+### 2.4 XGMII 直驱（可选简化，纯 MAC 功能验证）
+
+若只验 MAC 功能正确性、不关心链路层时序，可省掉整条串行链路：帧直接
+展开成 XGMII 拍驱 DUT 的 rxd/rxc（跳过 PCS/编码/锁定过程），DUT TX 的
+XGMII 拍直接采样重组帧。仿真更快，但链路不真实——没有锁定、弹性 idle
+增删、fault 传播。当前 agent 未内置该模式（driver 方向是"当 MAC 发"），
+需要时可加"直驱模式"开关。验证复位/反压/fault 等链路条件行为必须走
+串行（形态 A 标准拓扑）。
+
+### 2.5 两种形态怎么选
 
 - DUT 交付物只有 MAC RTL（PHY 用行为模型/后续集成）→ 形态 A。
 - DUT 是 MAC+PHY 集成（子系统/全芯片）→ 形态 B，最贴近真实链路，
