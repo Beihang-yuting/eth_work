@@ -66,8 +66,10 @@ class eth_pcs_phy_bfm;
   protected bit       tx_started;
   protected bit       tx_primed;   // 弹性垫已预灌标志（复位后重灌）
 
-  // RX 链路是否已完成块/码字/多 lane 对齐（test 在发流前等待）
+  // RX 链路是否已完成块/码字/多 lane 对齐（test 在发流前等待）。
+  // 直驱模式无串行链路，恒视为已锁 —— 既有测试的等锁流程无需适配
   function bit rx_locked();
+    if (cfg.xgmii_direct) return 1;
     if (cfg.num_lanes > 1) return mrx.is_aligned();
     return cfg.fec_enable ? fdec.is_locked() : bsync.is_locked();
   endfunction
@@ -110,7 +112,15 @@ class eth_pcs_phy_bfm;
   // 启动全部通路线程；由 agent 的 run_phase fork 调用，永不返回。
   // 多 lane 时串行收发按 lane 各起一个线程
   task run();
-    if (cfg.num_lanes > 1) begin
+    // 直驱模式：只需 XGMII 两个方向的采样/驱动线程，串行线程不起
+    //（位钟也已由宏关掉，省掉 10G+ 事件密度 —— 提速的主要来源）
+    if (cfg.xgmii_direct) begin
+      fork
+        tx_sample_loop();
+        rx_pin_drive_loop();
+      join
+    end
+    else if (cfg.num_lanes > 1) begin
       fork
         tx_sample_loop();
         rx_pin_drive_loop();
@@ -145,6 +155,20 @@ class eth_pcs_phy_bfm;
 
       if (!cfg.vif_xgmii.rst_n) begin
         pipeline_reset();
+        continue;
+      end
+
+      // 直驱模式：采样对端 MAC 的 TX 拍直接交 monitor（不进编码流水线）
+      if (cfg.xgmii_direct) begin
+        xgmii64_t w;
+        if ($isunknown(cfg.vif_xgmii.phy_cb.txd) ||
+            $isunknown(cfg.vif_xgmii.phy_cb.txc))
+          w = xgmii_all_idle();
+        else begin
+          w.data = cfg.vif_xgmii.phy_cb.txd;
+          w.ctl  = cfg.vif_xgmii.phy_cb.txc;
+        end
+        void'(rx_words.try_put(w));
         continue;
       end
 
@@ -384,6 +408,13 @@ class eth_pcs_phy_bfm;
   endtask
 
   // 复位：清两方向流水线与队列（统计计数保留，便于跨复位分析）
+  // 直驱模式发包入口：driver 把帧的 XGMII 拍压入 RX 引脚驱动队列，
+  // rx_pin_drive_loop 按字时钟驱向对端 MAC（队列空自动补 idle，帧间
+  // IPG 由 driver 压入的 idle 拍保证）
+  function void direct_tx_word(xgmii64_t w);
+    rxpin_q.push_back(w);
+  endfunction
+
   // 调试 dump 参数注入（构造后由 agent build 调用一次即可）
   function void arm_rx_dump();
     int from_us;

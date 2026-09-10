@@ -64,6 +64,17 @@ unit:
 	$(BUILD)/unit/simv -l $(BUILD)/unit/run.log
 	grep -q UNIT_TEST_PASS $(BUILD)/unit/run.log
 
+# XGMII 直驱（纯 MAC 功能验证提速：跳过 PCS/串行，位钟关闭）
+loopback_direct: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +XGMII_DIRECT -l $(BUILD)/loopback/run_direct.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_direct.log
+
+stress_direct: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +XGMII_DIRECT -l $(BUILD)/loopback/stress_direct.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_direct.log
+
 loopback: loopback_simv
 	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
 	  -l $(BUILD)/loopback/run.log

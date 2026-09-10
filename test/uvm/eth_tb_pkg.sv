@@ -272,6 +272,13 @@ package eth_tb_pkg;
       cfg_b.fec_enable = fec_mode;
       cfg_b.vif_xgmii  = vxb;
 
+      // XGMII 直驱模式（纯 MAC 功能验证提速）：发包序列零适配，
+      // 链路层（PCS/串行/锁定）整体旁路，接线见 lb_env 宏的 force 段
+      if ($test$plusargs("XGMII_DIRECT")) begin
+        cfg_a.xgmii_direct = 1;
+        cfg_b.xgmii_direct = 1;
+      end
+
       if (mld_lanes > 1) begin
         cfg_a.num_lanes  = mld_lanes;
         cfg_b.num_lanes  = mld_lanes;

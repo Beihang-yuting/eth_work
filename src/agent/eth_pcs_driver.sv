@@ -17,6 +17,9 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
 
   eth_pcs_cfg cfg;
 
+  // 直驱模式下的发包通道（agent 注入；普通模式不用）
+  eth_pcs_phy_bfm bfm;
+
   // 已发送帧（期望流）
   uvm_analysis_port #(eth_frame_txn) tx_ap;
 
@@ -35,9 +38,12 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
   endfunction
 
   virtual task run_phase(uvm_phase phase);
+    if (cfg.xgmii_direct && bfm == null)
+      `uvm_fatal("BFM", "直驱模式需要 agent 注入 phy_bfm 句柄")
     fork
       fetch_loop();
-      drive_loop();
+      // 直驱模式不驱 XGMII 引脚（引脚属于对端 MAC 方向，由 BFM 驱动）
+      if (!cfg.xgmii_direct) drive_loop();
     join
   endtask
 
@@ -56,8 +62,15 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
       seq_item_port.get_next_item(t);
 
       eth_frame_to_words(t.data, words);
-      foreach (words[i]) word_q.push_back(words[i]);
-      repeat (cfg.idle_words_per_gap) word_q.push_back(xgmii_all_idle());
+      if (cfg.xgmii_direct) begin
+        // 直驱：拍序列绕过引脚，直接进 BFM 的对端驱动队列
+        foreach (words[i]) bfm.direct_tx_word(words[i]);
+        repeat (cfg.idle_words_per_gap) bfm.direct_tx_word(xgmii_all_idle());
+      end
+      else begin
+        foreach (words[i]) word_q.push_back(words[i]);
+        repeat (cfg.idle_words_per_gap) word_q.push_back(xgmii_all_idle());
+      end
 
       tx_ap.write(t);
       seq_item_port.item_done();

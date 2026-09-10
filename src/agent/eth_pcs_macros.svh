@@ -56,7 +56,7 @@
     name``_bit_clk_gen = new(`"name``_bit_clk`", name``_bit_clk_if); \
     name``_bit_clk_gen.set_freq(bit_hz); \
     name``_word_clk_gen.start(); \
-    name``_bit_clk_gen.start(); \
+    if (!$test$plusargs("XGMII_DIRECT")) name``_bit_clk_gen.start(); \
   end
 
 // 复位：低有效 rst_n，上电 10 个字时钟后释放
@@ -248,6 +248,9 @@
 // 全部 vif 下发。top 仅需本宏与 run_test（见 test/uvm/top.sv）。
 // 各速率取用：10g/25g/5g 走 <a>_serial 单 lane；40g 走 <a>_l[0..3]。
 // 单/多 lane 接口恒实例化（elaboration 静态），闲置侧无害。
+// +XGMII_DIRECT：直驱模式环回 —— 双向 XGMII 交叉 force（a 的 PHY 驱动
+// rxd 直接成为 b 的 MAC 输入 txd，反之亦然），位钟关闭省事件（提速
+// 主要来源），串行线闲置。cfg.xgmii_direct 由 test 按同名插件参数置位。
 `define eth_pcs_lb_env(a, b) \
   `eth_pcs_clk_gen(sys) \
   `eth_pcs_ctrl_reset(ctrl, rst_n, sys_word_clk) \
@@ -261,6 +264,12 @@
   `eth_pcs_vifs(a) \
   `eth_pcs_vifs(b) \
   `eth_pcs_mld_vifs(a, 4) \
-  `eth_pcs_mld_vifs(b, 4)
+  `eth_pcs_mld_vifs(b, 4) \
+  initial if ($test$plusargs("XGMII_DIRECT")) begin \
+    force b``_xgmii.txd = a``_xgmii.rxd; \
+    force b``_xgmii.txc = a``_xgmii.rxc; \
+    force a``_xgmii.txd = b``_xgmii.rxd; \
+    force a``_xgmii.txc = b``_xgmii.rxc; \
+  end
 
 `endif // ETH_PCS_MACROS_SVH

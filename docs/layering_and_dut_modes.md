@@ -156,14 +156,23 @@ VIP 的位置换成 DUT：
   3. 若 DUT 的 KR 口不能旁路自协商，需先完成 AN/LT（cl73/72）建链——
      本仓库该项在做，未完成前需 DUT 配成强制速率模式（force mode）。
 
-### 2.4 XGMII 直驱（可选简化，纯 MAC 功能验证）
+### 2.4 XGMII 直驱开关（纯 MAC 功能验证提速）
 
-若只验 MAC 功能正确性、不关心链路层时序，可省掉整条串行链路：帧直接
-展开成 XGMII 拍驱 DUT 的 rxd/rxc（跳过 PCS/编码/锁定过程），DUT TX 的
-XGMII 拍直接采样重组帧。仿真更快，但链路不真实——没有锁定、弹性 idle
-增删、fault 传播。当前 agent 未内置该模式（driver 方向是"当 MAC 发"），
-需要时可加"直驱模式"开关。验证复位/反压/fault 等链路条件行为必须走
-串行（形态 A 标准拓扑）。
+只验 MAC 功能正确性、不关心链路层时序时，开 `cfg.xgmii_direct`（配套
+插件参数 `+XGMII_DIRECT`）跳过整条 PCS/串行链路：
+
+- driver 的帧直接展开成 XGMII 拍，经 BFM 驱向 DUT 的 rxd/rxc；DUT TX
+  的 XGMII 拍直接采样交 monitor 装配 —— **发包序列零适配**，同一个
+  `eth_frame_txn` 序列两种模式通用；
+- `rx_locked()` 直驱下恒为 1，既有测试的等锁流程也无需改；
+- 位时钟随 `+XGMII_DIRECT` 关闭（提速主要来源：10G+ 位钟事件全免）。
+  实测 1000 帧 stress 仿真 CPU 时间 4.59s -> 1.05s（约 4.4x，帧数越大
+  差距越大）；
+- 自测目标：`make loopback_direct` / `make stress_direct`（lb_env 宏在
+  该插件参数下 force 双向 XGMII 交叉环回）。
+
+代价：无锁定过程、弹性 idle 增删、fault 传播。验证复位/反压/fault 等
+链路条件行为必须走串行（形态 A 标准拓扑）。
 
 ### 2.5 两种形态怎么选
 

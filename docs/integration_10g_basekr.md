@@ -87,6 +87,9 @@ endmodule
 | `` `eth_pcs_mld_rx_wire `` | 40g | 接 svt VIP 多 lane 接收向 |
 | `` `eth_pcs_svt_clock_gen/wire `` | VIP 全模式 | VIP 27 域时钟全套 |
 
+另有 `+XGMII_DIRECT` 直驱开关（纯 MAC 功能验证提速 ~4x，跳过 PCS/串行，
+发包序列零适配），见 layering_and_dut_modes.md §2.4。
+
 **全速率环回 top 只需一个宏**：
 
 ```systemverilog

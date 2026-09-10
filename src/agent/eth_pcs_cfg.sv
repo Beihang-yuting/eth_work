@@ -24,6 +24,13 @@ class eth_pcs_cfg extends uvm_object;
   // 每帧之后驱动的全空闲拍数（8 字节/拍；2 拍 = 16 字节 ≥ 最小 IPG 12）
   int idle_words_per_gap = 2;
 
+  // XGMII 直驱模式（纯 MAC 功能验证提速用）：1 = 跳过 PCS/串行整条链路，
+  // driver 的帧直接展开成 XGMII 拍经 BFM 驱向对端（rxd/rxc），对端 MAC
+  // 发来的 XGMII 拍（txd/txc）直接采样交 monitor 装配。发包序列零适配。
+  // 代价：无锁定/弹性/fault 等链路层时序。配套 +XGMII_DIRECT 插件参数
+  //（test 置本位 + 宏关位钟省事件 + lb_env 环回 force 接线）。
+  bit xgmii_direct = 0;
+
   // 多 lane（Clause 82 MLD，40G=4）：1 = 单 lane 经典路径；>1 时启用
   // MLD 分发/重组，串行接口用 vif_serial_lanes[0..num_lanes-1]，
   // vif_serial 不用。MLD 模式下 fec_enable 必须为 0（未支持叠加）。
