@@ -338,6 +338,11 @@ class eth_pcs_phy_bfm;
   protected int invalid_dump_left = 40;
   protected int tx_dump_left = 60;
 
+  // 调试：+RX_DUMP_FROM_US=<t> 起打印前 N 个非 idle 接收块（解扰后
+  // 块型 + 解码出的 XGMII 拍），定位复位后帧损伤的块级现场
+  protected int      rx_dump_left = 0;
+  protected realtime rx_dump_from = 0;
+
   // 单块后处理：解扰 -> 解码 -> 双路递交
   protected function void deliver_block(block66_t blk);
     xgmii64_t w;
@@ -349,6 +354,12 @@ class eth_pcs_phy_bfm;
         $display("[PCS_RX_INVALID] @%0t sync=%b btf=%02x payload=%016x",
                  $time, blk.sync, blk.payload[7:0], blk.payload);
       end
+    end
+    if (rx_dump_left > 0 && $realtime >= rx_dump_from &&
+        !(blk.sync == SYNC_CTRL && blk.payload == {56'h0, BT_CTRL})) begin
+      rx_dump_left--;
+      $display("[PCS_RX_BLK] @%0t sync=%b btf=%02x payload=%016x ctl=%02x data=%016x",
+               $time, blk.sync, blk.payload[7:0], blk.payload, w.ctl, w.data);
     end
     void'(rx_words.try_put(w));
     rxpin_q.push_back(w);
@@ -373,6 +384,15 @@ class eth_pcs_phy_bfm;
   endtask
 
   // 复位：清两方向流水线与队列（统计计数保留，便于跨复位分析）
+  // 调试 dump 参数注入（构造后由 agent build 调用一次即可）
+  function void arm_rx_dump();
+    int from_us;
+    if ($value$plusargs("RX_DUMP_FROM_US=%d", from_us)) begin
+      rx_dump_from = from_us * 1us;
+      rx_dump_left = 120;
+    end
+  endfunction
+
   protected function void pipeline_reset();
     scr.reset();
     descr.reset();

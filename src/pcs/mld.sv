@@ -135,6 +135,14 @@ class mld_rx_c;
   protected int since_am[MLD_MAX_LANES];
   protected int learned_gap;
 
+  // 全局推进计数（每 push 一块 +1）与各 lane 锚定 AM 时的计数值。
+  // 用途：判定各 lane 的去偏斜锚是否来自同一个 AM 周期 —— 对端不断流
+  // 而本端复位重锁时，各 lane 重锁时刻可分散超过一个 AM 周期，若把
+  // 相差整周期的 AM 当同一锚，重组会交织错周期的块（持久乱码且各
+  // lane 周期自检均正常，无法自愈）。锚点跨度超窗即继续等下一轮 AM。
+  protected longint push_tick;
+  protected longint last_am_tick[MLD_MAX_LANES];
+
   function new(int lanes, int spacing);
     num_lanes  = lanes;
     am_spacing = spacing;
@@ -147,6 +155,8 @@ class mld_rx_c;
     foreach (bip_rx[i]) bip_rx[i] = '0;
     foreach (am_seen[i]) am_seen[i] = 0;
     foreach (since_am[i]) since_am[i] = 0;
+    foreach (last_am_tick[i]) last_am_tick[i] = 0;
+    push_tick   = 0;
     learned_gap = -1;
     aligned = 0;
     rr      = 0;
@@ -162,6 +172,7 @@ class mld_rx_c;
   // 失败路径：AM 图案与既有映射冲突（线缆中途换接）→ 整体重对齐。
   function void push_block(int phys, block66_t b);
     int l = mld_am_lane(b);
+    push_tick++;
 
     if (l >= 0) begin
       am_seen[phys]++;
@@ -204,16 +215,31 @@ class mld_rx_c;
 
       // 以 AM 为对齐锚：仅初对齐阶段清残余（去偏斜）。对齐后 AM 只
       // 跳过不入队 —— 此时清队会丢弃尚未消费的数据块。
-      if (!aligned) lane_q[phys].delete();
+      if (!aligned) begin
+        lane_q[phys].delete();
+        last_am_tick[phys] = push_tick;
+      end
 
-      // 全部逻辑 lane 已识别即进入对齐态，重组从逻辑 lane0 开始
+      // 全部逻辑 lane 已识别、且各 lane 锚点出自同一 AM 周期（锚点
+      // tick 跨度小于半个周期窗）才进入对齐态；跨度超窗说明有 lane
+      // 错锚到相邻周期 —— 保持未对齐，等其下一个 AM 重新锚定收敛
       if (!aligned) begin
         bit all = 1;
+        longint mn, mx, t;
         for (int i = 0; i < num_lanes; i++)
           if (phys_of_logical[i] == -1) all = 0;
         if (all) begin
-          aligned = 1;
-          rr      = 0;
+          mn = last_am_tick[phys_of_logical[0]];
+          mx = mn;
+          for (int i = 1; i < num_lanes; i++) begin
+            t = last_am_tick[phys_of_logical[i]];
+            if (t < mn) mn = t;
+            if (t > mx) mx = t;
+          end
+          if (mx - mn < am_spacing * num_lanes / 2) begin
+            aligned = 1;
+            rr      = 0;
+          end
         end
       end
       return;

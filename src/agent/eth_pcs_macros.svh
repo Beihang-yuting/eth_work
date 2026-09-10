@@ -6,13 +6,27 @@
 //       无需了解时钟比/弹性域/lane 位置等内部约定。
 // 依赖：aip_clk 三件套（须先 include）、eth_pcs_if.sv。
 // 用法示例见 docs/integration_10g_basekr.md 与 test/uvm/top.sv。
+//
+// 宏 <-> 速率对照（速率由 +SPEED 运行时选择，无需换宏/换 top）：
+//   eth_pcs_lb_env        全速率一键环回环境（10g/25g/5g 单 lane +
+//                         40g 4 lane 超集，推荐入口，见 test/uvm/top.sv）
+//   eth_pcs_clk_gen       全速率（内含 +SPEED 频率表：10g/25g/5g/40g；
+//                         40g 另读 +AM_SPACING，默认 512）
+//   eth_pcs_ctrl_reset    全速率（复位 + 中途复位/扰动钩子）
+//   eth_pcs_port/vifs/connect        10g/25g/5g 单 lane
+//   eth_pcs_mld_lanes/connect/vifs   40g（100G 后续同族）
+//   eth_pcs_mld_rx_wire   40g 接 svt VIP 专用
+//   eth_pcs_connect_svt   10g/25g/5g 接 svt VIP 专用
+//   eth_pcs_svt_clock_gen/wire       svt VIP 全模式（27 域时钟全套）
 // -----------------------------------------------------------------------------
 
 `ifndef ETH_PCS_MACROS_SVH
 `define ETH_PCS_MACROS_SVH
 
 // 时钟对：<name>_word_clk / <name>_bit_clk 两根 wire。
-// +SPEED=10g|25g|5g 选线速率（默认 10g）；字时钟恒为位钟/66 并加
+// +SPEED=10g|25g|5g|40g 选线速率（默认 10g）；字时钟 = 位钟/66（40g
+// 为 4 lane 合流：4×位钟/66 再扣 AM 带宽开销 (sp-1)/sp，sp 由
+// +AM_SPACING 给出，默认 512，须与 test 侧 cfg.am_spacing 一致）并加
 // +100ppm（删除主导域约定，见 phy_bfm 头注），使用者无需关心。
 `define eth_pcs_clk_gen(name) \
   aip_clk_if name``_word_clk_if (); \
@@ -23,15 +37,21 @@
   wire name``_bit_clk  = name``_bit_clk_if.clk; \
   initial begin \
     string speed_s = "10g"; \
-    real   bit_hz; \
+    int    am_sp = 512; \
+    real   bit_hz, word_hz; \
     void'($value$plusargs("SPEED=%s", speed_s)); \
+    void'($value$plusargs("AM_SPACING=%d", am_sp)); \
     case (speed_s) \
       "25g":   bit_hz = 25.78125e9; \
       "5g":    bit_hz = 5.15625e9; \
       default: bit_hz = 10.3125e9; \
     endcase \
+    if (speed_s == "40g") \
+      word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
+    else \
+      word_hz = bit_hz / 66.0; \
     name``_word_clk_gen = new(`"name``_word_clk`", name``_word_clk_if); \
-    name``_word_clk_gen.set_freq(bit_hz / 66.0); \
+    name``_word_clk_gen.set_freq(word_hz); \
     name``_word_clk_gen.set_ppm(100); \
     name``_bit_clk_gen = new(`"name``_bit_clk`", name``_bit_clk_if); \
     name``_bit_clk_gen.set_freq(bit_hz); \
@@ -167,5 +187,80 @@
   assign vip_if.mii_10M_tx_clk         = pfx``_m10_clk; \
   assign vip_if.mii_10M_rx_clk         = pfx``_m10_clk; \
   assign vip_if.mdio_clk               = pfx``_mdio_clk;
+
+// ---------------- 多 lane（MLD，40G/100G）一键宏 ----------------
+
+// 多 lane 串行接口组：声明 <name>_l[n]（40G n=4；100G 后续 20）
+`define eth_pcs_mld_lanes(name, n, bit_clk, rst_n) \
+  serial_if name``_l [n] (bit_clk, rst_n);
+
+// 双端多 lane 交叉环回（背靠背拓扑）；err 注到 a->b 的 lane0 ——
+// 多 lane 下单 lane 受扰即破坏重组，足以覆盖扰动恢复场景。
+// 不需要扰动时传 1'b0。
+`define eth_pcs_mld_connect(a, b, n, err) \
+  for (genvar gi = 0; gi < n; gi++) begin : g_mldconn_``a``_``b \
+    assign b``_l[gi].rx_bit = a``_l[gi].tx_bit ^ ((gi == 0) ? (err) : 1'b0); \
+    assign a``_l[gi].rx_bit = b``_l[gi].tx_bit; \
+  end
+
+// 多 lane 接 svt VIP 的接收方向：<port>_l[i].rx <= vip.tx_lane[i]。
+// 发送方向 vip.rx_lane 因需按运行时模式 mux（单/多 lane 不能双驱动），
+// 留在 top 手写。
+`define eth_pcs_mld_rx_wire(port, vip_if, n) \
+  for (genvar gi = 0; gi < n; gi++) begin : g_mldsvt_``port \
+    assign port``_l[gi].rx_bit = vip_if.tx_lane[gi]; \
+  end
+
+// 下发多 lane virtual interface，键名 "vif_serial_<name>_l<i>"
+// （与 eth_loopback_test 40G 装配、svt 40g 测试的取用约定一致）
+`define eth_pcs_mld_vifs(name, n) \
+  for (genvar gi = 0; gi < n; gi++) begin : g_mldvif_``name \
+    initial uvm_config_db#(virtual serial_if)::set(null, "uvm_test_top", \
+      $sformatf({"vif_serial_", `"name`", "_l%0d"}, gi), name``_l[gi]); \
+  end
+
+// 复位 + TB 控制钩子：上电 10 字拍释放 rst；此后响应 ctrl.reset_req
+// 产生复位脉冲并清零作完成握手（中途复位测试协议，见 tb_ctrl_if 头注）。
+// vif 键 "vif_ctrl"。
+`define eth_pcs_ctrl_reset(ctrl, rst, word_clk) \
+  tb_ctrl_if ctrl (); \
+  logic rst = 0; \
+  initial begin \
+    repeat (10) @(posedge word_clk); \
+    rst = 1; \
+    forever begin \
+      @(posedge word_clk); \
+      if (ctrl.reset_req) begin \
+        rst = 0; \
+        repeat (10) @(posedge word_clk); \
+        rst = 1; \
+        ctrl.reset_req = 0; \
+      end \
+    end \
+  end \
+  initial uvm_config_db#(virtual tb_ctrl_if)::set(null, "uvm_test_top", \
+                                                  "vif_ctrl", ctrl);
+
+// ---------------- 一键环回环境（速率 +SPEED 运行时选择） ----------------
+
+// 展开 = 时钟（+SPEED 频率表）+ 复位/控制 + A/B 两端单 lane 接口对与
+// 4 lane 接口组 + 全部交叉接线（扰动注 A->B：单 lane 线及 lane0）+
+// 全部 vif 下发。top 仅需本宏与 run_test（见 test/uvm/top.sv）。
+// 各速率取用：10g/25g/5g 走 <a>_serial 单 lane；40g 走 <a>_l[0..3]。
+// 单/多 lane 接口恒实例化（elaboration 静态），闲置侧无害。
+`define eth_pcs_lb_env(a, b) \
+  `eth_pcs_clk_gen(sys) \
+  `eth_pcs_ctrl_reset(ctrl, rst_n, sys_word_clk) \
+  `eth_pcs_port(a, sys_word_clk, sys_bit_clk, rst_n) \
+  `eth_pcs_port(b, sys_word_clk, sys_bit_clk, rst_n) \
+  `eth_pcs_mld_lanes(a, 4, sys_bit_clk, rst_n) \
+  `eth_pcs_mld_lanes(b, 4, sys_bit_clk, rst_n) \
+  assign b``_serial.rx_bit = a``_serial.tx_bit ^ ctrl.err_inject; \
+  assign a``_serial.rx_bit = b``_serial.tx_bit; \
+  `eth_pcs_mld_connect(a, b, 4, ctrl.err_inject) \
+  `eth_pcs_vifs(a) \
+  `eth_pcs_vifs(b) \
+  `eth_pcs_mld_vifs(a, 4) \
+  `eth_pcs_mld_vifs(b, 4)
 
 `endif // ETH_PCS_MACROS_SVH

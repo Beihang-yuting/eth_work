@@ -72,7 +72,32 @@ endmodule
 
 ### 3.1 宏捷径（推荐）
 
-`src/agent/eth_pcs_macros.svh` 封装了上述全部样板，top 层五个宏完成集成：
+`src/agent/eth_pcs_macros.svh` 封装了上述全部样板。
+
+**宏 <-> 速率对照**（速率由 `+SPEED` 运行时选择，不换宏不换 top）：
+
+| 宏 | 适用速率 | 说明 |
+|---|---|---|
+| `` `eth_pcs_lb_env(a, b) `` | 全速率 | 一键环回环境（时钟/复位/接口/接线/vif 全包，见 test/uvm/top.sv） |
+| `` `eth_pcs_clk_gen `` | 全速率 | +SPEED=10g\|25g\|5g\|40g 频率表；40g 另读 +AM_SPACING（默认 512） |
+| `` `eth_pcs_ctrl_reset `` | 全速率 | 复位 + 中途复位/扰动钩子（vif_ctrl） |
+| `` `eth_pcs_port/vifs/connect `` | 10g/25g/5g | 单 lane 接口对/下发/环回接线 |
+| `` `eth_pcs_mld_lanes/connect/vifs `` | 40g | 4 lane 组声明/环回接线/下发（100G 同族扩展） |
+| `` `eth_pcs_connect_svt `` | 10g/25g/5g | 接 svt VIP 单 lane |
+| `` `eth_pcs_mld_rx_wire `` | 40g | 接 svt VIP 多 lane 接收向 |
+| `` `eth_pcs_svt_clock_gen/wire `` | VIP 全模式 | VIP 27 域时钟全套 |
+
+**全速率环回 top 只需一个宏**：
+
+```systemverilog
+module top;
+  import uvm_pkg::*;  import eth_tb_pkg::*;
+  `eth_pcs_lb_env(a, b)     // +SPEED=10g|25g|5g|40g 运行时选速率
+  initial run_test();
+endmodule
+```
+
+分立宏手动集成（对接 VIP 等自定义拓扑）：
 
 ```systemverilog
 `include "aip_log.sv"

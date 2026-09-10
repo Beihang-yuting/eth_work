@@ -137,8 +137,18 @@ package eth_svt_cross_pkg;
       our_rx_count++;
       if (!t.crc_ok || !t.preamble_ok) begin
         our_rx_bad++;
-        `uvm_error("XSB", $sformatf("方向A 脏帧: %s", t.convert2string()))
+        `uvm_error("XSB", $sformatf("方向A 脏帧(第 %0d 帧): %s",
+                                    our_rx_count, t.convert2string()))
       end
+    endfunction
+
+    // 段间清零（复位恢复测试用）：各方向计数与脏帧计数全清
+    function void clear();
+      vip_tx_count = 0;
+      our_rx_count = 0;
+      our_tx_count = 0;
+      vip_rx_count = 0;
+      our_rx_bad   = 0;
     endfunction
 
     virtual function void check_phase(uvm_phase phase);
@@ -186,6 +196,32 @@ package eth_svt_cross_pkg;
         `uvm_send(t)
       end
     endtask
+
+  endclass
+
+  // ---------------- 复位窗 VIP checker 降级 ----------------
+
+  // 我方 PHY 中途复位会让对端 VIP 看到断流/失锁，其 register_fail:* 系
+  // 列（sync/BER/align/bip 等）在复位窗内属预期扰动，降为 WARNING；
+  // 窗外（active=0）原样放行 —— 只豁免预期窗口，不掩盖真实错误。
+  class vip_err_window_demoter extends uvm_report_catcher;
+
+    `uvm_object_utils(vip_err_window_demoter)
+
+    bit active;
+
+    function new(string name = "vip_err_window_demoter");
+      super.new(name);
+    endfunction
+
+    virtual function action_e catch();
+      if (active && get_severity() == UVM_ERROR) begin
+        string id = get_id();
+        if (id.len() >= 13 && id.substr(0, 12) == "register_fail")
+          set_severity(UVM_WARNING);
+      end
+      return THROW;
+    endfunction
 
   endclass
 
@@ -305,36 +341,32 @@ package eth_svt_cross_pkg;
       env = cross_env::type_id::create("env", this);
     endfunction
 
-    // 双向发流：先等我方 RX 对 VIP idle 码流锁定（VIP 侧对齐由其内部
-    // 状态机完成，只能靠时间裕量），再并发两方向序列，最后等计数收齐。
-    virtual task run_phase(uvm_phase phase);
-      vip_frame_seq    seq_a = vip_frame_seq::type_id::create("seq_a");
-      eth_loopback_seq seq_b = eth_loopback_seq::type_id::create("seq_b");
-
-      seq_b.num_frames = 1000;
-      void'($value$plusargs("A_FRAMES=%d", seq_a.num_frames));
-      void'($value$plusargs("B_FRAMES=%d", seq_b.num_frames));
-
-      phase.raise_objection(this);
-
-      // 等锁加诊断与上限：每 20us 打印一次对齐状态（slip/invalid），
-      // 500us 仍未锁按 FATAL 终止 —— 避免高事件密度速率下磨到全局
-      // 超时（等价挂死），且现场数据直接指向失锁原因
-      begin
-        int waited_us = 0;
-        while (!env.phy_agent.bfm.rx_locked()) begin
-          #20us;
-          waited_us += 20;
-          `uvm_info("TEST", $sformatf(
-            "等锁 %0dus: locked=%0b slip=%0d invalid=%0d",
-            waited_us, env.phy_agent.bfm.rx_locked(),
-            env.phy_agent.bfm.get_slip_count(),
-            env.phy_agent.bfm.invalid_block_count), UVM_LOW)
-          if (waited_us >= (mld_mode ? 2000 : 500))
-            `uvm_fatal("TEST", "500us 未锁定 —— 对端码流不兼容或未起流")
-        end
+    // 等锁加诊断与上限：每 20us 打印一次对齐状态（slip/invalid），
+    // 超上限按 FATAL 终止 —— 避免高事件密度速率下磨到全局超时
+    //（等价挂死），且现场数据直接指向失锁原因
+    protected task wait_lock();
+      int waited_us = 0;
+      while (!env.phy_agent.bfm.rx_locked()) begin
+        #20us;
+        waited_us += 20;
+        `uvm_info("TEST", $sformatf(
+          "等锁 %0dus: locked=%0b slip=%0d invalid=%0d",
+          waited_us, env.phy_agent.bfm.rx_locked(),
+          env.phy_agent.bfm.get_slip_count(),
+          env.phy_agent.bfm.invalid_block_count), UVM_LOW)
+        if (waited_us >= (mld_mode ? 2000 : 500))
+          `uvm_fatal("TEST", "等锁超时 —— 对端码流不兼容或未起流")
       end
       #5us;
+    endtask
+
+    // 一段双向流量：A 向 na 帧 + B 向 nb 帧并发，等计数收齐（相对当前
+    // 计数为增量，段前如需清零由调用方 sb.clear()）
+    protected task run_traffic(int na, int nb);
+      vip_frame_seq    seq_a = vip_frame_seq::type_id::create("seq_a");
+      eth_loopback_seq seq_b = eth_loopback_seq::type_id::create("seq_b");
+      seq_a.num_frames = na;
+      seq_b.num_frames = nb;
 
       fork
         seq_a.start(env.vip_mac.sequencer);
@@ -343,8 +375,15 @@ package eth_svt_cross_pkg;
 
       fork begin
         fork
-          wait (env.sb.our_rx_count >= seq_a.num_frames &&
-                env.sb.vip_rx_count >= seq_b.num_frames);
+          wait (env.sb.our_rx_count >= na && env.sb.vip_rx_count >= nb);
+          forever begin
+            #10us;
+            `uvm_info("TEST", $sformatf(
+              "进度: A=%0d(bad=%0d) B=%0d invalid=%0d slip=%0d",
+              env.sb.our_rx_count, env.sb.our_rx_bad, env.sb.vip_rx_count,
+              env.phy_agent.bfm.invalid_block_count,
+              env.phy_agent.bfm.get_slip_count()), UVM_LOW)
+          end
           begin
             #run_timeout;
             `uvm_error("TEST", $sformatf(
@@ -355,11 +394,94 @@ package eth_svt_cross_pkg;
         join_any
         disable fork;
       end join
+    endtask
+
+    // 双向发流：先等我方 RX 对 VIP idle 码流锁定（VIP 侧对齐由其内部
+    // 状态机完成，只能靠时间裕量），再并发两方向序列，最后等计数收齐。
+    virtual task run_phase(uvm_phase phase);
+      int na = 500, nb = 1000;
+      void'($value$plusargs("A_FRAMES=%d", na));
+      void'($value$plusargs("B_FRAMES=%d", nb));
+
+      phase.raise_objection(this);
+      wait_lock();
+      run_traffic(na, nb);
 
       env.sb.draining = 1;
 
       #10us;   // 拖尾：让 monitor 收尾帧
 
+      phase.drop_objection(this);
+    endtask
+
+  endclass
+
+  // ---------------- 交叉中途复位恢复测试 ----------------
+
+  // 流量中途复位我方 PHY（VIP 持续在线），检验重锁与流量恢复：
+  // 每轮 = 段流量收齐 -> 复位（复位窗内 VIP checker 降级、计分暂停）
+  // -> 重锁 -> 清计数；末段流量后按段计数判定。覆盖多轮复位。
+  class eth_svt_cross_reset_test extends eth_svt_cross_test;
+
+    `uvm_component_utils(eth_svt_cross_reset_test)
+
+    protected virtual tb_ctrl_if ctrl;
+    protected vip_err_window_demoter dem;
+
+    // 复位轮数（段数 = 轮数 + 1）
+    localparam int RESET_ROUNDS = 3;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      if (!uvm_config_db#(virtual tb_ctrl_if)::get(this, "", "tb_ctrl", ctrl))
+        `uvm_fatal("CFG", "未取得 tb_ctrl 接口（top_svt 下发）")
+      dem = vip_err_window_demoter::type_id::create("dem");
+      uvm_report_cb::add(null, dem);
+    endfunction
+
+    virtual task run_phase(uvm_phase phase);
+      int na = 100, nb = 200;
+      void'($value$plusargs("A_FRAMES=%d", na));
+      void'($value$plusargs("B_FRAMES=%d", nb));
+
+      phase.raise_objection(this);
+      wait_lock();
+
+      for (int round = 0; round <= RESET_ROUNDS; round++) begin
+        run_traffic(na, nb);
+        `uvm_info("TEST", $sformatf(
+          "第 %0d 段流量收齐: A=%0d B=%0d bad=%0d", round,
+          env.sb.our_rx_count, env.sb.vip_rx_count, env.sb.our_rx_bad),
+          UVM_LOW)
+        if (env.sb.our_rx_bad != 0)
+          `uvm_error("TEST", $sformatf("第 %0d 段方向A 脏帧 %0d",
+                                       round, env.sb.our_rx_bad))
+        if (round == RESET_ROUNDS) break;
+
+        // 复位窗开：对端预期报错降级 + 我方计分暂停
+        dem.active      = 1;
+        env.sb.draining = 1;
+
+        ctrl.reset_req = 1;
+        wait (!ctrl.reset_req);   // top 完成复位脉冲的握手
+        wait_lock();              // 我方重锁 VIP 码流（多 lane 含同周期
+                                  // 锚定收敛，见 mld_rx 去偏斜注释）
+        #20us;                    // VIP 端重对齐我方新码流裕量
+
+        // 复位窗关：清段计数重新计
+        env.sb.clear();
+        env.sb.draining = 0;
+        dem.active      = 0;
+      end
+
+      `uvm_info("TEST", $sformatf("CROSS_RESET_RECOVERY_PASS rounds=%0d",
+                                  RESET_ROUNDS), UVM_LOW)
+      env.sb.draining = 1;
+      #10us;
       phase.drop_objection(this);
     endtask
 

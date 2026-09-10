@@ -21,7 +21,7 @@ foreach (cfg.vif_serial_lanes[i]) cfg.vif_serial_lanes[i] = <lane i 接口>;
 // 单 lane 的 cfg.vif_serial 不使用
 ```
 
-## 3. top 层要点（参考 test/uvm/top_40g.sv）
+## 3. top 层要点（参考 test/uvm/top.sv，`eth_pcs_lb_env 一键展开）
 
 - 每端 4 个 `serial_if`（位钟 10.3125G），交叉连线按 lane 对接；
   vif 下发键名 `vif_serial_<port>_l<i>`。
@@ -37,6 +37,7 @@ make loopback_40g      # 40G 环回冒烟
 make stress_40g        # 1000 帧大流量
 make multi_reset_40g   # 5 轮中途复位恢复
 make svt_40g           # svt VIP 双向交叉（A: VIP->我方 500 帧，B: 我方->VIP 1000 帧）
+make svt_40g_reset     # 交叉中途复位恢复（3 轮复位，VIP 持续在线）
 ```
 
 判读同 10G；`rx_locked()` 在多 lane 模式表示 MLD 全 lane 对齐完成。
@@ -53,6 +54,10 @@ make svt_40g           # svt VIP 双向交叉（A: VIP->我方 500 帧，B: 我�
 - BIP-8 按 IEEE 表 82-4 实现（TX 生成 + RX 校验），与 VIP checker 互通。
 - mld_rx 对齐后 AM 间隔自检为学习式（首个完整间隔作基准），兼容对端对
   spacing 是否含 AM 的不同计数约定；偏离即整体重对齐。
+- 去偏斜锚点同周期校验：对端不断流而本端复位重锁时，各 lane 重锁时刻
+  可分散超过一个 AM 周期，锚点 tick 跨度超半周期窗则继续等下一轮 AM
+  收敛 —— 否则会把相差整周期的块交织重组（持久乱码且周期自检无法发现）。
+  svt_40g_reset 覆盖此场景。
 
 ## 6. 已知限制（TODO）
 

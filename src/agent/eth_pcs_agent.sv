@@ -46,6 +46,7 @@ class eth_pcs_agent extends uvm_agent;
     uvm_config_db#(eth_pcs_cfg)::set(this, "*", "cfg", cfg);
 
     bfm = new(cfg);
+    bfm.arm_rx_dump();
     mon = eth_pcs_monitor::type_id::create("mon", this);
 
     if (cfg.is_active) begin

@@ -104,7 +104,8 @@ module top_svt;
   `eth_pcs_port(p, our_word_clk, our_serial_clk, our_rst_n)
 
   // 40G 模式的 4 条串行 lane（位钟同 BASE-R 10.3125G；其余模式闲置）
-  serial_if p_serial_l [4] (v_serial_baser_clk, our_rst_n);
+  // 集成宏：lane 组声明（实例 p_l[i]，vif 键 vif_serial_p_l<i>）
+  `eth_pcs_mld_lanes(p, 4, v_serial_baser_clk, our_rst_n)
 
   // ---------------- 串行链路交叉连接 ----------------
 
@@ -112,17 +113,32 @@ module top_svt;
   // 单 lane（10G/25G）走 lane bit0；40G 走 tx_lane[3:0]/rx_lane[3:0]。
   // rx_lane 按模式 mux（不能双驱动，故不复用 connect_svt 宏）
   assign mac_ethernet_if.rx_lane =
-    use_40g ? {'0, p_serial_l[3].tx_bit, p_serial_l[2].tx_bit,
-                    p_serial_l[1].tx_bit, p_serial_l[0].tx_bit}
+    use_40g ? {'0, p_l[3].tx_bit, p_l[2].tx_bit,
+                    p_l[1].tx_bit, p_l[0].tx_bit}
             : {'0, p_serial.tx_bit};
   assign p_serial.rx_bit = mac_ethernet_if.tx_lane[0];
 
-  for (genvar gi = 0; gi < 4; gi++) begin : g_l40
-    assign p_serial_l[gi].rx_bit = mac_ethernet_if.tx_lane[gi];
+  // 集成宏：多 lane 接收方向接线 + vif 下发
+  `eth_pcs_mld_rx_wire(p, mac_ethernet_if, 4)
+  `eth_pcs_mld_vifs(p, 4)
 
-    initial uvm_config_db#(virtual serial_if)::set(null, "uvm_test_top",
-      $sformatf("vif_serial_p_l%0d", gi), p_serial_l[gi]);
+  // ---------------- TB 控制（中途复位钩子） ----------------
+
+  // 复位仅作用我方 PHY 域（our_rst_n）；VIP 持续运行，覆盖"对端在线、
+  // 我方复位重连"的恢复场景（键名 tb_ctrl，测试握手协议见 tb_ctrl_if）
+  tb_ctrl_if ctrl ();
+
+  always @(posedge our_word_clk) begin
+    if (ctrl.reset_req) begin
+      our_rst_n = 0;
+      repeat (20) @(posedge our_word_clk);
+      our_rst_n = 1;
+      ctrl.reset_req = 0;
+    end
   end
+
+  initial uvm_config_db#(virtual tb_ctrl_if)::set(null, "uvm_test_top",
+                                                  "tb_ctrl", ctrl);
 
   // ---------------- UVM 启动 ----------------
 

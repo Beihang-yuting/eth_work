@@ -95,6 +95,11 @@ stress_5g: loopback_simv
 	  +SPEED=5g -l $(BUILD)/loopback/stress_5g.log
 	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_5g.log
 
+multi_reset_5g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=5g -l $(BUILD)/loopback/multi_reset_5g.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_5g.log
+
 svt_25g:
 	mkdir -p $(BUILD)/svt
 	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
@@ -104,27 +109,22 @@ svt_25g:
 	  +SPEED=25g -l $(BUILD)/svt/run_25g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_25g.log
 
-# 40G（4 lane MLD）环回系：独立顶层 top_40g，+SPEED=40g 装配
-.PHONY: loopback_40g_simv
-loopback_40g_simv:
-	mkdir -p $(BUILD)/loopback40g
-	$(VCS) -f filelist_40g.f -top top_40g \
-	  -o $(BUILD)/loopback40g/simv -l $(BUILD)/loopback40g/compile.log
+# 40G（4 lane MLD）环回系：统一 top（`eth_pcs_lb_env 超集），仅
+# +SPEED=40g 切换 —— 与 10g/25g/5g 共用一个 simv
+loopback_40g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g -l $(BUILD)/loopback/run_40g.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_40g.log
 
-loopback_40g: loopback_40g_simv
-	$(BUILD)/loopback40g/simv +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
-	  +SPEED=40g -l $(BUILD)/loopback40g/run.log
-	grep -q "match=20 mismatch=0" $(BUILD)/loopback40g/run.log
+stress_40g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g -l $(BUILD)/loopback/stress_40g.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_40g.log
 
-stress_40g: loopback_40g_simv
-	$(BUILD)/loopback40g/simv +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
-	  +SPEED=40g -l $(BUILD)/loopback40g/stress.log
-	grep -q "match=1000 mismatch=0" $(BUILD)/loopback40g/stress.log
-
-multi_reset_40g: loopback_40g_simv
-	$(BUILD)/loopback40g/simv +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
-	  +SPEED=40g -l $(BUILD)/loopback40g/multi_reset.log
-	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback40g/multi_reset.log
+multi_reset_40g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g -l $(BUILD)/loopback/multi_reset_40g.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_40g.log
 
 svt_40g:
 	mkdir -p $(BUILD)/svt
@@ -134,6 +134,37 @@ svt_40g:
 	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=40g -l $(BUILD)/svt/run_40g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_40g.log
+
+# svt 交叉中途复位恢复：3 轮复位 × 每段 A100+B200，末段按段计数判定
+svt_25g_reset:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
+	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g -l $(BUILD)/svt/run_25g_reset.log
+	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_25g_reset.log
+	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_25g_reset.log
+
+svt_reset:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
+	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  -l $(BUILD)/svt/run_reset.log
+	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_reset.log
+	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_reset.log
+
+svt_40g_reset:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
+	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g -l $(BUILD)/svt/run_40g_reset.log
+	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_40g_reset.log
+	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_40g_reset.log
 
 # 阶段 2：与 svt ethernet VIP 交叉验证（需 DESIGNWARE_HOME 与
 # dw_vip_setup 生成的 ETH_SVT_DESIGN，见 filelist_svt.f 头注）

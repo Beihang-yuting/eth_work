@@ -250,7 +250,7 @@ package eth_tb_pkg;
 
       super.build_phase(phase);
 
-      // +SPEED=40g：MLD 4 lane 模式（top_40g 提供每 lane 串行接口，
+      // +SPEED=40g：MLD 4 lane 模式（top 的 `eth_pcs_lb_env 提供每 lane 串行接口，
       // 键名 vif_serial_<a|b>_l<i>），AM 间隔用仿真加速值
       begin
         string speed = "10g";

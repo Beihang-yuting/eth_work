@@ -25,6 +25,8 @@ make stress_25g        # 25G 大流量 1000 帧
 make multi_reset_25g   # 25G 多次复位覆盖
 make stress_5g         # 5G 大流量 1000 帧
 make svt_25g           # 25G 与 svt VIP（ETH_25G_SERIAL）交叉验证
+make svt_25g_reset     # 25G 交叉中途复位恢复（3 轮复位，VIP 持续在线）
+make multi_reset_5g    # 5G 环回多次复位覆盖
 
 # 任意测试换速率：
 build/loopback/simv +UVM_TESTNAME=eth_stress_test +SPEED=25g +NUM_FRAMES=5000
