@@ -17,6 +17,9 @@
 
 ## 2. 分层结构
 
+（本节为 agent 内部模块分层；完整 802.3 MAC/PHY 层级、各子层功能与
+真实 DUT 对接发包方法见 `layering_and_dut_modes.md`。）
+
 ```
           sequencer (net_packet packet_item)
               |
