@@ -81,6 +81,52 @@ multi_reset_an: loopback_simv
 	  +AN -l $(BUILD)/loopback/multi_reset_an.log
 	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_an.log
 
+# RS-FEC（Clause 91，RS(528,514)）自环系。VIP 的 RS-FEC 只绑定 100G
+# CSBI 接口，交叉验证随 100G 多 lane 一并做
+loopback_rsfec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +RSFEC -l $(BUILD)/loopback/run_rsfec.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_rsfec.log
+
+stress_rsfec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +RSFEC -l $(BUILD)/loopback/stress_rsfec.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_rsfec.log
+
+multi_reset_rsfec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +RSFEC -l $(BUILD)/loopback/multi_reset_rsfec.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_rsfec.log
+
+# 链路扰动下的 RS-FEC 纠错能力：注错期间帧仍应全净（7 符号/码字内）
+disturb_rsfec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_disturb_recovery_test +UVM_MAX_QUIT_COUNT=5 \
+	  +RSFEC -l $(BUILD)/loopback/disturb_rsfec.log
+	grep -q "段2(恢复后) 完成 match=500" $(BUILD)/loopback/disturb_rsfec.log
+
+# Clause 72 链路训练（自环；VIP 不支持 cl72 故无交叉档）
+loopback_lt: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_an_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +LT -l $(BUILD)/loopback/run_lt.log
+	grep -q "match=100 mismatch=0" $(BUILD)/loopback/run_lt.log
+
+# KR 完整建链：AN(cl73) -> LT(cl72) -> 数据模式 -> 流量
+loopback_kr: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_kr_linkup_test +UVM_MAX_QUIT_COUNT=5 \
+	  +AN +LT -l $(BUILD)/loopback/run_kr.log
+	grep -q "KR_LINKUP_PASS" $(BUILD)/loopback/run_kr.log
+	grep -q "match=100 mismatch=0" $(BUILD)/loopback/run_kr.log
+
+stress_kr: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +AN +LT -l $(BUILD)/loopback/stress_kr.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_kr.log
+
+multi_reset_kr: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +AN +LT -l $(BUILD)/loopback/multi_reset_kr.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_kr.log
+
 # XGMII 直驱（纯 MAC 功能验证提速：跳过 PCS/串行，位钟关闭）
 loopback_direct: loopback_simv
 	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \

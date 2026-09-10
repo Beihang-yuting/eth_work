@@ -279,6 +279,25 @@ package eth_tb_pkg;
         cfg_b.xgmii_direct = 1;
       end
 
+      // RS-FEC（cl91）：+RSFEC 开启，与 cl74 的 fec_mode 互斥
+      if ($test$plusargs("RSFEC")) begin
+        if (fec_mode)
+          `uvm_fatal("CFG", "+RSFEC 与 cl74 FEC 测试变体互斥");
+        if (mld_lanes > 1)
+          `uvm_fatal("CFG", "RS-FEC 与 MLD 叠加未实现");
+        cfg_a.rs_fec_enable = 1;
+        cfg_b.rs_fec_enable = 1;
+      end
+
+      // Clause 72 链路训练：+LT 开启（可与 +AN 组合成完整 KR 建链
+      // 序列 AN -> LT -> 数据；VIP 不支持 cl72，仅自环用）
+      if ($test$plusargs("LT")) begin
+        if (mld_lanes > 1)
+          `uvm_fatal("CFG", "LT(cl72) 仅单 lane 路径支持");
+        cfg_a.lt_enable = 1;
+        cfg_b.lt_enable = 1;
+      end
+
       // Clause 73 自协商：+AN 开启，两端 nonce 必须不同（避免碰撞）
       if ($test$plusargs("AN")) begin
         if (mld_lanes > 1)
@@ -334,13 +353,36 @@ package eth_tb_pkg;
     // 等待双向链路锁定 + 解扰自同步裕量（link-up；复位后亦复用）。
     // AN(cl73) 开启时 rx_locked() 内含"AN 完成"条件，故本流程无需改动
     protected task wait_link_up();
+      int waited_us = 0;
       while (!(env.agent_a.bfm.rx_locked() && env.agent_b.bfm.rx_locked()))
+      begin
         #100ns;
+        waited_us++;
+        // 每 100us 打一次建链阶段现场：AN/LT 卡住时直接指出停在哪一步
+        if (waited_us % 1000 == 0 &&
+            (env.agent_a.cfg.an_enable || env.agent_a.cfg.lt_enable))
+          `uvm_info("TEST", $sformatf(
+            "建链等待 %0dus: A[AN=%s(%0d页) LT=%s(taps=%0d,%0d帧)] B[AN=%s(%0d页) LT=%s(taps=%0d,%0d帧)]",
+            waited_us / 10,
+            env.agent_a.bfm.an_state(), env.agent_a.bfm.an_pages(),
+            env.agent_a.bfm.lt_state(), env.agent_a.bfm.lt_taps(),
+            env.agent_a.bfm.lt_frames(),
+            env.agent_b.bfm.an_state(), env.agent_b.bfm.an_pages(),
+            env.agent_b.bfm.lt_state(), env.agent_b.bfm.lt_taps(),
+            env.agent_b.bfm.lt_frames()), UVM_LOW)
+      end
       if (env.agent_a.cfg.an_enable)
         `uvm_info("TEST", $sformatf("AN 完成: A=%s(%0d页) B=%s(%0d页)",
                   env.agent_a.bfm.an_state(), env.agent_a.bfm.an_pages(),
                   env.agent_b.bfm.an_state(), env.agent_b.bfm.an_pages()),
                   UVM_LOW)
+      if (env.agent_a.cfg.lt_enable)
+        `uvm_info("TEST", $sformatf(
+                  "LT 完成: A=%s(taps=%0d,%0d帧) B=%s(taps=%0d,%0d帧)",
+                  env.agent_a.bfm.lt_state(), env.agent_a.bfm.lt_taps(),
+                  env.agent_a.bfm.lt_frames(),
+                  env.agent_b.bfm.lt_state(), env.agent_b.bfm.lt_taps(),
+                  env.agent_b.bfm.lt_frames()), UVM_LOW)
       #1us;
     endtask
 
@@ -418,6 +460,37 @@ package eth_tb_pkg;
       else
         `uvm_info("TEST", $sformatf("AN_LINKUP_PASS A页=%0d B页=%0d",
                   env.agent_a.bfm.an_pages(), env.agent_b.bfm.an_pages()),
+                  UVM_LOW)
+    endfunction
+
+  endclass
+
+  // KR 完整建链：AN(cl73) -> LT(cl72) -> 数据模式 -> 流量。
+  // 判据 = 双端 AN 完成 + LT 三抽头收敛 + 帧全匹配。
+  class eth_kr_linkup_test extends eth_loopback_test;
+
+    `uvm_component_utils(eth_kr_linkup_test)
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      num_frames  = 100;
+      run_timeout = 10ms;
+    endfunction
+
+    virtual function void check_phase(uvm_phase phase);
+      super.check_phase(phase);
+      if (!env.agent_a.bfm.an_done() || !env.agent_b.bfm.an_done())
+        `uvm_error("TEST", "AN 未完成")
+      else if (!env.agent_a.bfm.lt_done() || !env.agent_b.bfm.lt_done())
+        `uvm_error("TEST", "LT 未完成")
+      else if (env.agent_a.bfm.lt_taps() != 3 ||
+               env.agent_b.bfm.lt_taps() != 3)
+        `uvm_error("TEST", "LT 抽头未全部收敛")
+      else
+        `uvm_info("TEST", $sformatf(
+                  "KR_LINKUP_PASS AN页=%0d/%0d LT帧=%0d/%0d",
+                  env.agent_a.bfm.an_pages(), env.agent_b.bfm.an_pages(),
+                  env.agent_a.bfm.lt_frames(), env.agent_b.bfm.lt_frames()),
                   UVM_LOW)
     endfunction
 

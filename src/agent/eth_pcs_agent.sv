@@ -45,6 +45,11 @@ class eth_pcs_agent extends uvm_agent;
     // 向子组件透传同一 cfg
     uvm_config_db#(eth_pcs_cfg)::set(this, "*", "cfg", cfg);
 
+    if (cfg.fec_enable && cfg.rs_fec_enable)
+      `uvm_fatal("CFG", "fec_enable 与 rs_fec_enable 互斥（不同的码，不叠加）")
+    if (cfg.rs_fec_enable && cfg.num_lanes > 1)
+      `uvm_fatal("CFG", "RS-FEC 与 MLD 叠加未实现（随 100G 多 lane 一并做）")
+
     bfm = new(cfg);
     bfm.arm_rx_dump();
     mon = eth_pcs_monitor::type_id::create("mon", this);

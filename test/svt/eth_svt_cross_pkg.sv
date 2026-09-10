@@ -27,6 +27,15 @@ package eth_svt_cross_pkg;
   // ---------------- VIP 配置 ----------------
 
   // 只定制接口模式：ETH_XSBI_SERIAL = 10G BASE-KR，tx_lane[0] 1bit 串行
+  // VIP 组件接齐说明（用户 2026-09-10 要求）：
+  //   ① 协议 checker：enable_all_protocol_checks（VIP 默认已开，显式置位
+  //      防被随机化改写）—— MAC/PCS/AN 全套 err_check 生效
+  //   ② 功能覆盖率：MAC/PCS/AN 三类 cov 收集器（默认关，须显式开）
+  //   ③ 驱动分析端口：enable_driver_analysis_port（VIP 发出的激励流，
+  //      与 monitor 观测流互为佐证）
+  //   ④ 双向 monitor 端口：TX/RX 各自接记分板（已有）
+  // 注：svt_ethernet_virtual_sequencer 只存在于 VIP 示例（OVM 本地类），
+  //   VIP 包内无此类，故不例化。
   class cross_svt_cfg extends svt_ethernet_agent_configuration;
 
     `uvm_object_utils(cross_svt_cfg)
@@ -35,13 +44,25 @@ package eth_svt_cross_pkg;
       super.new(name);
     endfunction
 
+    // 全部 VIP checker + 覆盖率收集器一次开齐（各 set_*_cfg 共用）
+    function void enable_all_vip_components();
+      enable_all_protocol_checks   = 1'b1;   // MAC/PCS/AN 全套协议检查
+      enable_mac_transaction_cov   = 1'b1;   // MAC 事务覆盖率
+      enable_mac_cov               = 1'b1;   // MAC 层覆盖率
+      enable_pcs_cov               = 1'b1;   // PCS 层覆盖率
+      enable_an_cov                = 1'b1;   // 自协商覆盖率
+      enable_driver_analysis_port  = 1'b1;   // 驱动侧激励流分析端口
+    endfunction
+
     function void set_kr_cfg();
       interface_select = ETH_XSBI_SERIAL;
+      enable_all_vip_components();
     endfunction
 
     // 25G 单 lane 串行（同 64b/66b 体系，仅时钟不同）
     function void set_25g_cfg();
       interface_select = ETH_25G_SERIAL;
+      enable_all_vip_components();
     endfunction
 
     // 40G 4 lane 串行（BASE-KR4，tx_lane[3:0]，MLD/AM 按标准 16384）
@@ -52,6 +73,7 @@ package eth_svt_cross_pkg;
       enable_an73_hcd  = ENABLE_AN73_HCD_10G_BASER;
       enable_fec       = 2'h0;
       enable_an73_reneg = 0;
+      enable_all_vip_components();
     endfunction
 
     function void set_40g_cfg();
@@ -61,6 +83,7 @@ package eth_svt_cross_pkg;
       // 16384 间隔的码流，每周期报 invalid_align/bip，累计阈值后 VIP
       // 内部复位并扰乱其 TX（方向 A 固定 2277us 处 76 块乱码的根因）。
       xlsbi_40g_align_timer = 64;
+      enable_all_vip_components();
     endfunction
 
   endclass
@@ -273,6 +296,7 @@ package eth_svt_cross_pkg;
       super.connect_phase(phase);
       vip_mac.monitor.item_collected_port_tx.connect(sb.svt_tx_imp);
       vip_mac.monitor.item_collected_port_rx.connect(sb.svt_rx_imp);
+
       phy_agent.drv.tx_ap.connect(sb.our_tx_imp);
       phy_agent.mon.rx_ap.connect(sb.our_rx_imp);
     endfunction

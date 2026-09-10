@@ -61,6 +61,7 @@ endfunction
 class an73_dme_tx_c;
 
   logic [47:0] page;            // 待发页（页边界锁存，可随时更新）
+  bit          page_start;      // 本拍是页首（供引擎按"本端已发页数"计时）
   protected int          tick;
   protected logic        level;
   protected logic [47:0] cur;
@@ -70,9 +71,10 @@ class an73_dme_tx_c;
   endfunction
 
   function void reset();
-    tick  = 0;
-    level = 0;
-    cur   = '0;
+    tick       = 0;
+    level      = 0;
+    cur        = '0;
+    page_start = 0;
   endfunction
 
   // 每 bit 时钟调用一次，返回线电平。
@@ -80,6 +82,7 @@ class an73_dme_tx_c;
   // 66k+33 处加中点跳变；49*66+132 处尾定界跳变；PAGE_TICKS 回卷。
   function logic tx_tick();
     int k;
+    page_start = (tick == 0);
     if (tick == 0) cur = page;
 
     // 胞界跳变覆盖 48 数据胞 + 1 填充胞（实测 VIP 末胞界 = 49*66=3234）
@@ -230,8 +233,17 @@ class an73_engine_c;
   endfunction
 
   // 每 bit 时钟：本 tick 应驱动的线电平
+  // 每 bit 时钟：本 tick 应驱动的线电平。
+  // AN_COMPLETE 的保持窗按"本端已发出页数"推进 —— 不能依赖对端继续
+  // 发页：先完成的一方会切到下一阶段（LT/数据）而停发 DME，若按收到
+  // 页数计时，后完成的一方将永久卡死（曾实测死锁）。
   function logic tx_tick();
-    return dme_tx.tx_tick();
+    logic b = dme_tx.tx_tick();
+    if (state == AN_COMPLETE && dme_tx.page_start) begin
+      hold_pages++;
+      if (hold_pages >= 6) state = AN_DONE;
+    end
+    return b;
   endfunction
 
   // 每 bit 时钟：喂线采样，页完成时推进仲裁
@@ -270,11 +282,7 @@ class an73_engine_c;
           hold_pages = 0;
         end
       end
-      AN_COMPLETE: begin
-        // 保持应答若干页给对端确认窗，再进 DONE 切数据模式
-        hold_pages++;
-        if (hold_pages >= 6) state = AN_DONE;
-      end
+      AN_COMPLETE: ;   // 保持窗由 tx_tick 按本端发页数推进（见其注释）
       default: ;
     endcase
   endfunction

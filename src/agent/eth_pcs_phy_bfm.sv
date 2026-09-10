@@ -40,8 +40,17 @@ class eth_pcs_phy_bfm;
   // 32 块 -> 码字间断流发 0 -> 对端永不锁定"。取 2 码字深。
   localparam int IDLE_DEL_THRESH_FEC = FEC_N * 2;
 
+  // RS-FEC 同理按码字粒度（5280bit/码字），取 2 个码字深
+  localparam int IDLE_DEL_THRESH_RS = RS91_CW_BITS * 2;
+
+  // 任一 FEC 模式（两者互斥）
+  function bit any_fec();
+    return cfg.fec_enable || cfg.rs_fec_enable;
+  endfunction
+
   // 当前模式的删除阈值
   function int del_thresh();
+    if (cfg.rs_fec_enable) return IDLE_DEL_THRESH_RS;
     return cfg.fec_enable ? IDLE_DEL_THRESH_FEC : IDLE_DEL_THRESH;
   endfunction
 
@@ -53,12 +62,20 @@ class eth_pcs_phy_bfm;
   protected fec_cl74_encoder_c fenc;
   protected fec_cl74_decoder_c fdec;
 
+  // RS-FEC（cl91）流水线：cfg.rs_fec_enable 时启用
+  protected rs91_fec_encoder_c renc;
+  protected rs91_fec_decoder_c rdec;
+
   // 多 lane（Clause 82 MLD）流水线：num_lanes>1 时启用。
   // 每物理 lane 独立 bit 队列与块同步；MLD 负责分发/AM/去偏/重组
   // Clause 73 自协商引擎（cfg.an_enable 时启用）：AN 完成前串行线由它
   // 驱动/采样，完成后 BFM 切回 PCS 数据通路（an_done 恒 1 后不再回退，
   // 复位重新协商）
   protected an73_engine_c an_eng;
+
+  // Clause 72 链路训练引擎（cfg.lt_enable 时启用）：AN 之后、数据模式
+  // 之前占用串行线跑训练帧；完成后不再回退（复位重新训练）
+  protected lt72_engine_c lt_eng;
 
   protected mld_tx_c     mtx;
   protected mld_rx_c     mrx;
@@ -75,9 +92,33 @@ class eth_pcs_phy_bfm;
   // 直驱模式无串行链路，恒视为已锁 —— 既有测试的等锁流程无需适配
   function bit rx_locked();
     if (cfg.xgmii_direct) return 1;
-    if (cfg.an_enable && !an_eng.is_done()) return 0;
+    if (in_an_phase() || in_lt_phase()) return 0;
     if (cfg.num_lanes > 1) return mrx.is_aligned();
+    if (cfg.rs_fec_enable) return rdec.is_locked();
     return cfg.fec_enable ? fdec.is_locked() : bsync.is_locked();
+  endfunction
+
+  // 建链阶段判定：AN 未完成 -> AN 阶段；AN 完成而 LT 未完成 -> LT 阶段；
+  // 都完成（或都未启用）-> 数据模式
+  protected function bit in_an_phase();
+    return cfg.an_enable && !an_eng.is_done();
+  endfunction
+  protected function bit in_lt_phase();
+    return cfg.lt_enable && !lt_eng.is_done() && !in_an_phase();
+  endfunction
+
+  // LT 状态观测
+  function bit lt_done();
+    return !cfg.lt_enable || lt_eng.is_done();
+  endfunction
+  function string lt_state();
+    return cfg.lt_enable ? lt_eng.state_name() : "LT_OFF";
+  endfunction
+  function int lt_frames();
+    return cfg.lt_enable ? lt_eng.frames_seen : 0;
+  endfunction
+  function int lt_taps();
+    return cfg.lt_enable ? lt_eng.tap_done : 0;
   endfunction
 
   // AN 状态观测（test 打印/判定用）
@@ -98,6 +139,7 @@ class eth_pcs_phy_bfm;
       for (int i = 0; i < cfg.num_lanes; i++) s += bsync_l[i].slip_count;
       return s;
     end
+    if (cfg.rs_fec_enable) return rdec.slip_count;
     return cfg.fec_enable ? fdec.slip_count : bsync.slip_count;
   endfunction
 
@@ -117,6 +159,8 @@ class eth_pcs_phy_bfm;
     bsync     = new();
     fenc      = new();
     fdec      = new();
+    renc      = new();
+    rdec      = new();
     tx_started = 0;
 
     if (cfg.an_enable) begin
@@ -124,6 +168,11 @@ class eth_pcs_phy_bfm;
       an_eng.ability = cfg.an_ability;
       an_eng.nonce   = cfg.an_nonce;
       an_eng.reset();
+    end
+
+    if (cfg.lt_enable) begin
+      lt_eng = new();
+      lt_eng.reset();
     end
 
     if (cfg.num_lanes > 1) begin
@@ -250,7 +299,11 @@ class eth_pcs_phy_bfm;
           continue;
         end
 
-        blk.payload = scr.scramble(blk.payload);
+        // RS-FEC 模式不做 66b 级加扰：cl91 的次序是"先 256B/257B 转码
+        // 再加扰"，而转码要读未加扰的块类型字段；跳变密度由码字级
+        // PN 加扰（rs91_pn_xor）保证。加扰在前会让转码读到乱码块类型，
+        // 查表失配 -> 整条码流报废（已实测）。
+        if (!cfg.rs_fec_enable) blk.payload = scr.scramble(blk.payload);
 
         if (cfg.num_lanes > 1) begin
           // MLD 分发：AM 先行入该 lane 队列，数据块随后
@@ -260,6 +313,11 @@ class eth_pcs_phy_bfm;
           mtx.push_block(blk, lane, amv, amb);
           if (amv) push66(txbit_lq[lane], amb);
           push66(txbit_lq[lane], blk);
+        end
+        else if (cfg.rs_fec_enable) begin
+          logic rcw[RS91_CW_BITS];
+          if (renc.push_block(blk, rcw))
+            for (int i = 0; i < RS91_CW_BITS; i++) txbit_q.push_back(rcw[i]);
         end
         else if (cfg.fec_enable) begin
           logic cw[FEC_N];
@@ -282,12 +340,18 @@ class eth_pcs_phy_bfm;
       @(cfg.vif_serial.tx_cb);
 
       // AN 阶段：线上是 DME 页波形，不是 PCS 码流
-      if (cfg.an_enable && !an_eng.is_done()) begin
+      if (in_an_phase()) begin
         cfg.vif_serial.tx_cb.tx_bit <= an_eng.tx_tick();
         continue;
       end
 
-      if (txbit_q.size() == 0 && tx_started && !cfg.fec_enable) begin
+      // LT 阶段：线上是 cl72 训练帧
+      if (in_lt_phase()) begin
+        cfg.vif_serial.tx_cb.tx_bit <= lt_eng.tx_tick();
+        continue;
+      end
+
+      if (txbit_q.size() == 0 && tx_started && !any_fec()) begin
         $display("[PCS_TX_INS] @%0t 弹性插入（队列见底）", $time);
         push_idle_block();
       end
@@ -374,13 +438,24 @@ class eth_pcs_phy_bfm;
         logic b = $isunknown(cfg.vif_serial.rx_cb.rx_bit)
                   ? 1'b0 : cfg.vif_serial.rx_cb.rx_bit;
 
-        // AN 阶段：采样交仲裁引擎；完成后本拍起走 PCS 通路
-        if (cfg.an_enable && !an_eng.is_done()) begin
+        // AN 阶段：采样交仲裁引擎；完成后本拍起走 LT 或 PCS 通路
+        if (in_an_phase()) begin
           an_eng.rx_tick(b);
           continue;
         end
 
-        if (cfg.fec_enable) begin
+        // LT 阶段：采样交训练引擎
+        if (in_lt_phase()) begin
+          lt_eng.rx_tick(b);
+          continue;
+        end
+
+        if (cfg.rs_fec_enable) begin
+          block66_t rblks[RS91_BLOCKS];
+          if (rdec.push_bit(b, rblks))
+            for (int k = 0; k < RS91_BLOCKS; k++) deliver_block(rblks[k]);
+        end
+        else if (cfg.fec_enable) begin
           block66_t blks[FEC_BLOCKS];
           if (fdec.push_bit(b, blks))
             for (int k = 0; k < FEC_BLOCKS; k++) deliver_block(blks[k]);
@@ -406,7 +481,8 @@ class eth_pcs_phy_bfm;
   // 单块后处理：解扰 -> 解码 -> 双路递交
   protected function void deliver_block(block66_t blk);
     xgmii64_t w;
-    blk.payload = descr.descramble(blk.payload);
+    // 与 TX 对称：RS-FEC 模式不做 66b 级解扰（见 tx_sample_loop 注释）
+    if (!cfg.rs_fec_enable) blk.payload = descr.descramble(blk.payload);
     if (!pcs_codec::decode(blk, w)) begin
       invalid_block_count++;
       if (invalid_dump_left > 0) begin
@@ -466,11 +542,14 @@ class eth_pcs_phy_bfm;
     bsync.reset();
     fenc.reset();
     fdec.reset();
+    renc.reset();
+    rdec.reset();
     txbit_q.delete();
     rxpin_q.delete();
     tx_started = 0;
     tx_primed  = 0;
     if (cfg.an_enable) an_eng.reset();
+    if (cfg.lt_enable) lt_eng.reset();
 
     if (cfg.num_lanes > 1) begin
       mtx.reset();

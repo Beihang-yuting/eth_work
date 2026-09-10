@@ -18,6 +18,12 @@ class eth_pcs_cfg extends uvm_object;
   // FEC 使能：1 = TX/RX 走 Clause 74 编解码；0 = 裸 64b/66b + 块同步
   bit fec_enable = 0;
 
+  // RS-FEC（Clause 91，RS(528,514) over GF(2^10)）使能：与 fec_enable
+  // 互斥（两者是不同的码，不叠加）。开启后 TX 走 256B/257B 转码 +
+  // RS 编码，RX 反向；纠错能力 7 个 10bit 符号/码字。
+  // 注：VIP 的 RS-FEC 只绑定 100G CSBI 接口，交叉验证随 100G 一并做。
+  bit rs_fec_enable = 0;
+
   // 主动模式：1 = 例化 sequencer/driver 充当 MAC 发流；0 = 仅 BFM+monitor
   bit is_active = 1;
 
@@ -49,6 +55,12 @@ class eth_pcs_cfg extends uvm_object;
 
   // 本端 Transmit Nonce（两端须不同，全 0 会被判为碰撞）
   logic [4:0] an_nonce = 5'h05;
+
+  // Clause 72 链路训练（KR 建链第二步，紧随 AN）：1 = AN 完成后先训练
+  // 再进数据模式；0 = 跳过训练直接进数据（既有行为）。可独立于 AN 使用
+  //（lt_enable=1 而 an_enable=0 时上电直接进训练阶段）。
+  // 注：svt VIP 不支持 cl72，交叉验证时须保持 0；自环测试可开。
+  bit lt_enable = 0;
 
   // 边界接口句柄：由 test 从 config_db 取得后填入
   virtual xgmii_if  vif_xgmii;

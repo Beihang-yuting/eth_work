@@ -90,6 +90,25 @@ endmodule
 另有 `+XGMII_DIRECT` 直驱开关（纯 MAC 功能验证提速 ~4x，跳过 PCS/串行，
 发包序列零适配），见 layering_and_dut_modes.md §2.4。
 
+### 3.2 建链与 FEC 开关一览
+
+| 插件参数 | 作用 | 自测目标 |
+|---|---|---|
+| `+AN` | Clause 73 自协商（DME 页交换） | `loopback_an` `stress_an` `multi_reset_an` |
+| `+LT` | Clause 72 链路训练（训练帧握手） | `loopback_lt` |
+| `+AN +LT` | KR 完整建链 AN→LT→数据 | `loopback_kr` `stress_kr` `multi_reset_kr` |
+| （cl74 变体测试类） | Clause 74 BASE-R FEC | `fec` `stress_fec` |
+| `+RSFEC` | Clause 91 RS-FEC RS(528,514) | `loopback_rsfec` `stress_rsfec` `multi_reset_rsfec` `disturb_rsfec` |
+| `+XGMII_DIRECT` | 跳过 PCS/串行直驱 XGMII | `loopback_direct` `stress_direct` |
+
+要点：
+- 两种 FEC 互斥（不同的码，不叠加），agent build 阶段校验；
+- RS-FEC 模式**不做 66b 级加扰** —— cl91 次序是"先 256B/257B 转码再
+  加扰"，转码要读未加扰的块类型字段；跳变密度由码字级 PN 加扰保证。
+  加扰放在前面会让转码读到乱码块类型、整条码流报废（已实测踩坑）；
+- RS-FEC 与 MLD 叠加、以及与 VIP 的交叉验证，随 100G 多 lane 一并做
+  （VIP 的 RS-FEC 只绑定 100G CSBI 接口）。
+
 **全速率环回 top 只需一个宏**：
 
 ```systemverilog
