@@ -55,6 +55,11 @@ class eth_pcs_phy_bfm;
 
   // 多 lane（Clause 82 MLD）流水线：num_lanes>1 时启用。
   // 每物理 lane 独立 bit 队列与块同步；MLD 负责分发/AM/去偏/重组
+  // Clause 73 自协商引擎（cfg.an_enable 时启用）：AN 完成前串行线由它
+  // 驱动/采样，完成后 BFM 切回 PCS 数据通路（an_done 恒 1 后不再回退，
+  // 复位重新协商）
+  protected an73_engine_c an_eng;
+
   protected mld_tx_c     mtx;
   protected mld_rx_c     mrx;
   protected block_sync_c bsync_l[MLD_MAX_LANES];
@@ -70,8 +75,20 @@ class eth_pcs_phy_bfm;
   // 直驱模式无串行链路，恒视为已锁 —— 既有测试的等锁流程无需适配
   function bit rx_locked();
     if (cfg.xgmii_direct) return 1;
+    if (cfg.an_enable && !an_eng.is_done()) return 0;
     if (cfg.num_lanes > 1) return mrx.is_aligned();
     return cfg.fec_enable ? fdec.is_locked() : bsync.is_locked();
+  endfunction
+
+  // AN 状态观测（test 打印/判定用）
+  function bit an_done();
+    return !cfg.an_enable || an_eng.is_done();
+  endfunction
+  function string an_state();
+    return cfg.an_enable ? an_eng.state_name() : "AN_OFF";
+  endfunction
+  function int an_pages();
+    return cfg.an_enable ? an_eng.pages_seen : 0;
   endfunction
 
   // 对外暴露 RX 侧对齐器统计的只读视图（多 lane 取各 lane 累计）
@@ -101,6 +118,13 @@ class eth_pcs_phy_bfm;
     fenc      = new();
     fdec      = new();
     tx_started = 0;
+
+    if (cfg.an_enable) begin
+      an_eng = new();
+      an_eng.ability = cfg.an_ability;
+      an_eng.nonce   = cfg.an_nonce;
+      an_eng.reset();
+    end
 
     if (cfg.num_lanes > 1) begin
       mtx = new(cfg.num_lanes, cfg.am_spacing);
@@ -257,6 +281,12 @@ class eth_pcs_phy_bfm;
     forever begin
       @(cfg.vif_serial.tx_cb);
 
+      // AN 阶段：线上是 DME 页波形，不是 PCS 码流
+      if (cfg.an_enable && !an_eng.is_done()) begin
+        cfg.vif_serial.tx_cb.tx_bit <= an_eng.tx_tick();
+        continue;
+      end
+
       if (txbit_q.size() == 0 && tx_started && !cfg.fec_enable) begin
         $display("[PCS_TX_INS] @%0t 弹性插入（队列见底）", $time);
         push_idle_block();
@@ -343,6 +373,12 @@ class eth_pcs_phy_bfm;
       begin
         logic b = $isunknown(cfg.vif_serial.rx_cb.rx_bit)
                   ? 1'b0 : cfg.vif_serial.rx_cb.rx_bit;
+
+        // AN 阶段：采样交仲裁引擎；完成后本拍起走 PCS 通路
+        if (cfg.an_enable && !an_eng.is_done()) begin
+          an_eng.rx_tick(b);
+          continue;
+        end
 
         if (cfg.fec_enable) begin
           block66_t blks[FEC_BLOCKS];
@@ -434,6 +470,7 @@ class eth_pcs_phy_bfm;
     rxpin_q.delete();
     tx_started = 0;
     tx_primed  = 0;
+    if (cfg.an_enable) an_eng.reset();
 
     if (cfg.num_lanes > 1) begin
       mtx.reset();

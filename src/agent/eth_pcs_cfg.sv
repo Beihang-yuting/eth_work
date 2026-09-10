@@ -39,6 +39,17 @@ class eth_pcs_cfg extends uvm_object;
   // 每 lane AM 间隔（标准 16384；仿真提速可调小，两端一致即可）
   int am_spacing = 16384;
 
+  // Clause 73 自协商（KR 电口建链）：1 = 上电先走 AN（DME 页交换），
+  // 协商完成后自动切入数据模式（PCS 码流）；0 = 直接进数据模式
+  //（force 速率，既有行为）。单 lane 路径有效；多 lane/FEC 叠加未做。
+  bit an_enable = 0;
+
+  // 本端 advertise 的技术能力位（A[24:0]，默认 A2 = 10GBASE-KR）
+  logic [24:0] an_ability = 25'h4;
+
+  // 本端 Transmit Nonce（两端须不同，全 0 会被判为碰撞）
+  logic [4:0] an_nonce = 5'h05;
+
   // 边界接口句柄：由 test 从 config_db 取得后填入
   virtual xgmii_if  vif_xgmii;
   virtual serial_if vif_serial;

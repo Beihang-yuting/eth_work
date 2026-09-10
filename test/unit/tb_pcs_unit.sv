@@ -308,6 +308,68 @@ module tb_pcs_unit;
              sent.size());
   endtask
 
+  // AN cl73 DME：TX 生成的电平序列经 RX 解回原页（含随机页内容）；
+  // 再验仲裁 FSM 在两实例对打下双向进入 DONE
+  task test_an73();
+    an73_dme_tx_c tx = new();
+    an73_dme_rx_c rx = new();
+    logic [47:0] pages[$];
+    logic [47:0] got[$];
+    logic [47:0] pg;
+    an73_engine_c ea = new();
+    an73_engine_c eb = new();
+    logic lvl;
+    logic la, lb, na, nb;
+    int guard;
+
+    // --- DME 自环：连发 6 页随机内容 ---
+    for (int p = 0; p < 6; p++) begin
+      logic [47:0] v = {$urandom, $urandom} & 48'hFFFF_FFFF_FFFF;
+      pages.push_back(v);
+    end
+
+    // 注意：module 内 task 默认 static，循环体内"声明带初值"只在 0 时刻
+    // 求值一次（曾因此让 tx_tick 全程只被调用 3 次）—— 声明与赋值必须分开
+    foreach (pages[p]) begin
+      tx.page = pages[p];
+      for (int t = 0; t < AN73_PAGE_TICKS; t++) begin
+        lvl = tx.tx_tick();
+        if (rx.rx_tick(lvl, pg)) got.push_back(pg);
+      end
+    end
+
+    // 首页可能因起始定界未建立而漏解，其余必须逐位还原
+    check("an73: dme pages decoded", got.size() >= pages.size() - 2);
+    begin
+      int off = pages.size() - got.size();
+      for (int i = 0; i < got.size(); i++)
+        check("an73: dme page content", got[i] == pages[off + i]);
+    end
+    $display("[OK] an73 DME roundtrip x%0d pages", got.size());
+
+    // --- 仲裁对打：A/B 两实例线上互连，等双方 DONE ---
+    ea.nonce = 5'h05;
+    eb.nonce = 5'h12;
+    ea.reset();
+    eb.reset();
+    la = 0;
+    lb = 0;
+    guard = 0;
+    while (!(ea.is_done() && eb.is_done()) && guard < AN73_PAGE_TICKS * 80) begin
+      na = ea.tx_tick();
+      nb = eb.tx_tick();
+      ea.rx_tick(lb);
+      eb.rx_tick(la);
+      la = na;
+      lb = nb;
+      guard++;
+    end
+    check("an73: A done", ea.is_done());
+    check("an73: B done", eb.is_done());
+    $display("[OK] an73 arbitration A=%s B=%s pages=%0d/%0d",
+             ea.state_name(), eb.state_name(), ea.pages_seen, eb.pages_seen);
+  endtask
+
   initial begin
     test_codec();
     test_scrambler();
@@ -315,6 +377,7 @@ module tb_pcs_unit;
     test_fec();
     test_frame_utils();
     test_mld();
+    test_an73();
     $display("UNIT_TEST_PASS (%0d checks)", test_count);
     $finish;
   end

@@ -72,7 +72,7 @@
 | PCS | 完整自研（10G/25G/5G 单 lane + 40G MLD） |
 | FEC | Clause 74 完整；RS-FEC (cl91/108) 待做 |
 | PMA | 数字核心行为级（1bit 串化 + 弹性域）；无 gearbox 并口/CDR 建模 |
-| AN/LT | 待做（完整形态优先级最高项） |
+| AN | Clause 73 自协商已实现（DME 页交换 + 基页仲裁，见 §2.6）；LT(cl72) 未做 |
 | PMD | 不建模 |
 
 即：本 agent 等效一颗"PHY 芯片"，上边 XGMII、下边 serdes 串行 lane。
@@ -153,8 +153,9 @@ VIP 的位置换成 DUT：
   1. 时钟/AM 参数与 DUT 一致（+SPEED、+AM_SPACING；教训见
      integration_40g.md：AM 间隔两侧必须一致）；
   2. 等锁流程同上；
-  3. 若 DUT 的 KR 口不能旁路自协商，需先完成 AN/LT（cl73/72）建链——
-     本仓库该项在做，未完成前需 DUT 配成强制速率模式（force mode）。
+  3. 若 DUT 的 KR 口不能旁路自协商，开 `cfg.an_enable`（`+AN`）走
+     Clause 73 建链，见 §2.6；DUT 若还要求 Clause 72 链路训练，当前
+     需配成训练旁路。
 
 ### 2.4 XGMII 直驱开关（纯 MAC 功能验证提速）
 
@@ -174,7 +175,35 @@ VIP 的位置换成 DUT：
 代价：无锁定过程、弹性 idle 增删、fault 传播。验证复位/反压/fault 等
 链路条件行为必须走串行（形态 A 标准拓扑）。
 
-### 2.5 两种形态怎么选
+### 2.5 Clause 73 自协商（KR 电口建链）
+
+真实 KR 口上电不是直接进数据模式，而是先自协商。开关：
+
+```systemverilog
+cfg.an_enable  = 1;          // 或插件参数 +AN
+cfg.an_ability = 25'h4;      // A2 = 10GBASE-KR（advertise 的技术能力）
+cfg.an_nonce   = 5'h05;      // 两端必须不同，否则判为碰撞
+```
+
+行为：上电后串行线由 AN 引擎驱动 DME 页波形（不是 PCS 码流），基页
+交换完成（能力检测 → Ack 回显对端 nonce → 双向确认）后自动切回 PCS
+数据通路。`rx_locked()` 内含"AN 完成"条件，**既有测试流程零改动**：
+`wait_link_up()` 会自动等到协商完成；复位后重新协商。
+
+观测接口：`bfm.an_done()` / `bfm.an_state()` / `bfm.an_pages()`。
+
+自测：`make loopback_an`（AN 完成 + 100 帧）、`make stress_an`（1000
+帧）、`make multi_reset_an`（5 轮复位重协商）。实测 ~4.9us、12 页收敛。
+
+DME 时序（胞宽 66 bit tick = 6.4ns、半胞 33 tick、页 49 胞 + 双段
+132 tick 静默定界、页周期 3498 tick = 339.2ns）由 svt VIP
+`ETH_AN_CL73` 真实波形逆向标定，非凭规范推断。
+
+限制（TODO）：Next Page 未实现（NP=0）；优先级解析按本端单能力位；
+Clause 72 链路训练未实现（VIP ETH_AN_CL73 流程 AN 后直接进数据模式，
+与之对齐）；多 lane/FEC 叠加未做。
+
+### 2.6 两种形态怎么选
 
 - DUT 交付物只有 MAC RTL（PHY 用行为模型/后续集成）→ 形态 A。
 - DUT 是 MAC+PHY 集成（子系统/全芯片）→ 形态 B，最贴近真实链路，

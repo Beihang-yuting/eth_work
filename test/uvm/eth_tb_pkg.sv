@@ -279,6 +279,16 @@ package eth_tb_pkg;
         cfg_b.xgmii_direct = 1;
       end
 
+      // Clause 73 自协商：+AN 开启，两端 nonce 必须不同（避免碰撞）
+      if ($test$plusargs("AN")) begin
+        if (mld_lanes > 1)
+          `uvm_fatal("CFG", "AN(cl73) 仅单 lane 路径支持");
+        cfg_a.an_enable = 1;
+        cfg_b.an_enable = 1;
+        cfg_a.an_nonce  = 5'h05;
+        cfg_b.an_nonce  = 5'h12;
+      end
+
       if (mld_lanes > 1) begin
         cfg_a.num_lanes  = mld_lanes;
         cfg_b.num_lanes  = mld_lanes;
@@ -321,10 +331,16 @@ package eth_tb_pkg;
       env = eth_loopback_env::type_id::create("env", this);
     endfunction
 
-    // 等待双向链路锁定 + 解扰自同步裕量（link-up；复位后亦复用）
+    // 等待双向链路锁定 + 解扰自同步裕量（link-up；复位后亦复用）。
+    // AN(cl73) 开启时 rx_locked() 内含"AN 完成"条件，故本流程无需改动
     protected task wait_link_up();
       while (!(env.agent_a.bfm.rx_locked() && env.agent_b.bfm.rx_locked()))
         #100ns;
+      if (env.agent_a.cfg.an_enable)
+        `uvm_info("TEST", $sformatf("AN 完成: A=%s(%0d页) B=%s(%0d页)",
+                  env.agent_a.bfm.an_state(), env.agent_a.bfm.an_pages(),
+                  env.agent_b.bfm.an_state(), env.agent_b.bfm.an_pages()),
+                  UVM_LOW)
       #1us;
     endtask
 
@@ -383,6 +399,30 @@ package eth_tb_pkg;
 
   // 1000 帧背靠背随机模板/长度（大流量标准）；判据与冒烟相同：
   // 零丢零错，另在 check 里核对 tx_underrun==0（速率匹配无断流）
+  // AN(cl73) 建链后跑流量：验证"协商完成 -> 数据模式切换 -> 流量正常"
+  // 的完整 KR 上电路径。判据 = AN 双端完成 + 帧全匹配。
+  class eth_an_loopback_test extends eth_loopback_test;
+
+    `uvm_component_utils(eth_an_loopback_test)
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      num_frames  = 100;
+      run_timeout = 10ms;
+    endfunction
+
+    virtual function void check_phase(uvm_phase phase);
+      super.check_phase(phase);
+      if (!env.agent_a.bfm.an_done() || !env.agent_b.bfm.an_done())
+        `uvm_error("TEST", "AN 未完成")
+      else
+        `uvm_info("TEST", $sformatf("AN_LINKUP_PASS A页=%0d B页=%0d",
+                  env.agent_a.bfm.an_pages(), env.agent_b.bfm.an_pages()),
+                  UVM_LOW)
+    endfunction
+
+  endclass
+
   class eth_stress_test extends eth_loopback_test;
 
     `uvm_component_utils(eth_stress_test)

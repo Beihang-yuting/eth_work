@@ -64,6 +64,23 @@ unit:
 	$(BUILD)/unit/simv -l $(BUILD)/unit/run.log
 	grep -q UNIT_TEST_PASS $(BUILD)/unit/run.log
 
+# Clause 73 自协商建链（AN 完成后自动切数据模式再跑流量）
+loopback_an: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_an_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +AN -l $(BUILD)/loopback/run_an.log
+	grep -q "AN_LINKUP_PASS" $(BUILD)/loopback/run_an.log
+	grep -q "match=100 mismatch=0" $(BUILD)/loopback/run_an.log
+
+stress_an: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +AN -l $(BUILD)/loopback/stress_an.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_an.log
+
+multi_reset_an: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +AN -l $(BUILD)/loopback/multi_reset_an.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_an.log
+
 # XGMII 直驱（纯 MAC 功能验证提速：跳过 PCS/串行，位钟关闭）
 loopback_direct: loopback_simv
 	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \

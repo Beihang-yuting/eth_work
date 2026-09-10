@@ -45,6 +45,15 @@ package eth_svt_cross_pkg;
     endfunction
 
     // 40G 4 lane 串行（BASE-KR4，tx_lane[3:0]，MLD/AM 按标准 16384）
+    // Clause 73 自协商：VIP 独立接口模式，AN 完成（HCD=10G BASE-R）后
+    // 自动切入 10G 串行数据模式（tx_lane[0]，同 XSBI 通路）
+    function void set_an73_cfg();
+      interface_select = ETH_AN_CL73;
+      enable_an73_hcd  = ENABLE_AN73_HCD_10G_BASER;
+      enable_fec       = 2'h0;
+      enable_an73_reneg = 0;
+    endfunction
+
     function void set_40g_cfg();
       interface_select = ETH_XLSBI_SERIAL;
       // AM 间隔与我方 BFM 统一为 64（VIP 默认值，合理约束仅 {64,128,256}；
@@ -309,6 +318,7 @@ package eth_svt_cross_pkg;
         case (speed)
           "25g":   vip_cfg.set_25g_cfg();
           "40g":   vip_cfg.set_40g_cfg();
+          "an73":  vip_cfg.set_an73_cfg();
           default: vip_cfg.set_kr_cfg();
         endcase
         mld_mode = (speed == "40g");
@@ -411,6 +421,56 @@ package eth_svt_cross_pkg;
 
       #10us;   // 拖尾：让 monitor 收尾帧
 
+      phase.drop_objection(this);
+    endtask
+
+  endclass
+
+  // ---------------- AN(cl73) DME 波形探针 ----------------
+
+  // 目的：VIP 在 ETH_AN_CL73 下持续发送 DME 页；本测试只采样其 TX 线
+  // 上的跳变时序（delta 时间 + 新值），作为我方 DME 编解码实现的
+  // ground truth（凭规范记忆猜实现细节的教训见 40G AM 章节）。
+  // 我方 TX 为 idle 码流，VIP checker 会报错 —— 全程降级。
+  class eth_svt_an_probe_test extends eth_svt_cross_test;
+
+    `uvm_component_utils(eth_svt_an_probe_test)
+
+    protected vip_err_window_demoter dem;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      dem = vip_err_window_demoter::type_id::create("dem");
+      dem.active = 1;
+      uvm_report_cb::add(null, dem);
+    endfunction
+
+    virtual task run_phase(uvm_phase phase);
+      virtual serial_if vs;
+      logic prev;
+      realtime tprev;
+      int n = 0;
+
+      if (!uvm_config_db#(virtual serial_if)::get(this, "", "vif_serial_p", vs))
+        `uvm_fatal("CFG", "probe 未取得串行接口")
+
+      phase.raise_objection(this);
+
+      prev  = vs.rx_bit;
+      tprev = $realtime;
+      while (n < 2000) begin
+        @(vs.rx_bit);
+        $display("[ANPROBE] @%0t delta=%0t val=%b",
+                 $realtime, $realtime - tprev, vs.rx_bit);
+        tprev = $realtime;
+        n++;
+      end
+
+      `uvm_info("TEST", "ANPROBE_DONE", UVM_LOW)
       phase.drop_objection(this);
     endtask
 
