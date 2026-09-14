@@ -14,6 +14,7 @@
 //                         40g 另读 +AM_SPACING，默认 512）
 //   eth_pcs_ctrl_reset    全速率（复位 + 中途复位/扰动钩子）
 //   eth_pcs_port/vifs/connect        10g/25g/5g 单 lane
+//   （1g/2.5g BASE-X：lb_env 另建 <a>_gmii/<b>_gmii，vif 键 vif_gmii_<x>）
 //   eth_pcs_mld_lanes/connect/vifs   40g（100G 后续同族）
 //   eth_pcs_mld_rx_wire   40g 接 svt VIP 专用
 //   eth_pcs_connect_svt   10g/25g/5g 接 svt VIP 专用
@@ -24,7 +25,8 @@
 `define ETH_PCS_MACROS_SVH
 
 // 时钟对：<name>_word_clk / <name>_bit_clk 两根 wire。
-// +SPEED=10g|25g|5g|40g 选线速率（默认 10g）；字时钟 = 位钟/66（40g
+// +SPEED=10g|25g|5g|40g|1g|2.5g 选线速率（默认 10g）；字时钟 = 位钟/66
+// （1g/2.5g 为 8b/10b：字节时钟 = 位钟/10，即 GMII 125/312.5MHz；40g
 // 为 4 lane 合流：4×位钟/66 再扣 AM 带宽开销 (sp-1)/sp，sp 由
 // +AM_SPACING 给出，默认 512，须与 test 侧 cfg.am_spacing 一致）并加
 // +100ppm（删除主导域约定，见 phy_bfm 头注），使用者无需关心。
@@ -44,10 +46,14 @@
     case (speed_s) \
       "25g":   bit_hz = 25.78125e9; \
       "5g":    bit_hz = 5.15625e9; \
+      "1g":    bit_hz = 1.25e9; \
+      "2.5g":  bit_hz = 3.125e9; \
       default: bit_hz = 10.3125e9; \
     endcase \
     if (speed_s == "40g") \
       word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
+    else if (speed_s == "1g" || speed_s == "2.5g") \
+      word_hz = bit_hz / 10.0; \
     else \
       word_hz = bit_hz / 66.0; \
     name``_word_clk_gen = new(`"name``_word_clk`", name``_word_clk_if); \
@@ -258,6 +264,8 @@
   `eth_pcs_port(b, sys_word_clk, sys_bit_clk, rst_n) \
   `eth_pcs_mld_lanes(a, 4, sys_bit_clk, rst_n) \
   `eth_pcs_mld_lanes(b, 4, sys_bit_clk, rst_n) \
+  gmii_if a``_gmii (sys_word_clk, rst_n); \
+  gmii_if b``_gmii (sys_word_clk, rst_n); \
   assign b``_serial.rx_bit = a``_serial.tx_bit ^ ctrl.err_inject; \
   assign a``_serial.rx_bit = b``_serial.tx_bit; \
   `eth_pcs_mld_connect(a, b, 4, ctrl.err_inject) \
@@ -265,6 +273,12 @@
   `eth_pcs_vifs(b) \
   `eth_pcs_mld_vifs(a, 4) \
   `eth_pcs_mld_vifs(b, 4) \
+  initial begin \
+    uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top", \
+      {"vif_gmii_", `"a`"}, a``_gmii); \
+    uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top", \
+      {"vif_gmii_", `"b`"}, b``_gmii); \
+  end \
   initial if ($test$plusargs("XGMII_DIRECT")) begin \
     force b``_xgmii.txd = a``_xgmii.rxd; \
     force b``_xgmii.txc = a``_xgmii.rxc; \

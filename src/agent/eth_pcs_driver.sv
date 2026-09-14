@@ -26,6 +26,18 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
   // 待驱动 XGMII 拍队列：fetch 线程生产，drive 线程消费
   protected xgmii64_t word_q[$];
 
+  // BASE-X：待驱动 GMII 字节队列（帧字节 tx_en=1 + IPG 字节 tx_en=0）
+  protected gmii_byte_t gbyte_q[$];
+
+  // BASE-X 帧间 IPG 字节数（最小 IPG 12 字节）
+  localparam int GMII_IPG = 12;
+
+  // 发送队列是否已排空（sequencer 供帧不耗时，帧会先整批入队；测试
+  // 判"在途帧已全部发出"须看队列而非固定延时 —— 线速越低排空越久）
+  function bit is_idle();
+    return cfg.basex ? (gbyte_q.size() == 0) : (word_q.size() == 0);
+  endfunction
+
   function new(string name, uvm_component parent);
     super.new(name, parent);
     tx_ap = new("tx_ap", this);
@@ -43,7 +55,8 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
     fork
       fetch_loop();
       // 直驱模式不驱 XGMII 引脚（引脚属于对端 MAC 方向，由 BFM 驱动）
-      if (!cfg.xgmii_direct) drive_loop();
+      if (cfg.basex)              gmii_drive_loop();
+      else if (!cfg.xgmii_direct) drive_loop();
     join
   endtask
 
@@ -52,6 +65,11 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
   // 必须先等复位释放：sequencer 供帧不耗仿真时间，若在复位期取帧，
   // drive_loop 的复位清队会把整批帧静默丢光。
   protected task fetch_loop();
+    if (cfg.basex) begin
+      gmii_fetch_loop();
+      return;
+    end
+
     wait (cfg.vif_xgmii.rst_n === 1'b1);
     @(cfg.vif_xgmii.mac_cb);
 
@@ -96,6 +114,42 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
         cfg.vif_xgmii.mac_cb.txd <= w.data;
         cfg.vif_xgmii.mac_cb.txc <= w.ctl;
       end
+    end
+  endtask
+
+  // ---------------- BASE-X（GMII）----------------
+
+  // 取帧 -> GMII 字节（前导/SFD/帧/FCS，tx_en=1）+ IPG（tx_en=0）
+  protected task gmii_fetch_loop();
+    wait (cfg.vif_gmii.rst_n === 1'b1);
+    @(cfg.vif_gmii.mac_cb);
+    forever begin
+      eth_frame_txn t;
+      byte unsigned b[$];
+      seq_item_port.get_next_item(t);
+      eth_frame_to_gmii(t.data, b);
+      foreach (b[i]) gbyte_q.push_back('{en:1, er:0, d:b[i]});
+      repeat (GMII_IPG) gbyte_q.push_back('{en:0, er:0, d:8'h07});
+      tx_ap.write(t);
+      seq_item_port.item_done();
+    end
+  endtask
+
+  // 每 GMII 字节时钟出一拍；复位期间清队并驱 idle
+  protected task gmii_drive_loop();
+    gmii_byte_t o;
+    forever begin
+      @(cfg.vif_gmii.mac_cb);
+      if (!cfg.vif_gmii.rst_n) begin
+        gbyte_q.delete();
+        o = '{en:0, er:0, d:8'h07};
+      end
+      else
+        o = (gbyte_q.size() > 0) ? gbyte_q.pop_front()
+                                 : '{en:0, er:0, d:8'h07};
+      cfg.vif_gmii.mac_cb.txd   <= o.d;
+      cfg.vif_gmii.mac_cb.tx_en <= o.en;
+      cfg.vif_gmii.mac_cb.tx_er <= o.er;
     end
   endtask
 

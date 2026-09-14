@@ -95,6 +95,19 @@ function automatic void eth_frame_to_words(byte unsigned frame[$],
   end
 endfunction
 
+// 帧字节（不含 FCS）-> GMII 字节序列（1G/2.5G BASE-X 的 MAC 侧）：
+// 7×前导 0x55 + SFD 0xD5 + 帧 + FCS，全部 tx_en=1；帧间 IPG 由调用方补
+// tx_en=0 字节。PCS 会以 /S/ 替换首个前导字节。
+function automatic void eth_frame_to_gmii(byte unsigned frame[$],
+                                          ref byte unsigned bytes[$]);
+  logic [31:0] fcs;
+  for (int i = 0; i < 7; i++) bytes.push_back(ETH_PREAMBLE);
+  bytes.push_back(ETH_SFD);
+  foreach (frame[i]) bytes.push_back(frame[i]);
+  fcs = eth_crc32(frame);
+  for (int i = 0; i < 4; i++) bytes.push_back(fcs[i*8 +: 8]);
+endfunction
+
 // 帧装配器：逐拍接收 XGMII，检出帧边界并校验。
 // 状态机：IDLE（找 S）-> IN_FRAME（收字节，找 T）。跨拍保存部分帧。
 class frame_assembler_c;
@@ -166,6 +179,55 @@ class frame_assembler_c;
     end
     return 0;
   endfunction
+
+  // GMII 逐字节装配（BASE-X）：rx_dv 高期间收字节，下降沿收尾。
+  // 线路字节 = 7×0x55 + SFD + 帧 + FCS；finalize 按 XGMII 惯例期望
+  // "6×0x55 + SFD"（XGMII 的 S 占掉首个前导），故丢弃首字节后复用。
+  // 帧内 rx_er 按损伤帧递交。
+  function bit push_gmii(bit dv, bit er, byte unsigned d,
+                         output frame_result_t res);
+    if (dv) begin
+      if (!in_frame) begin
+        in_frame = 1;
+        line_bytes.delete();
+        gmii_er  = 0;
+      end
+      if (er) gmii_er = 1;
+      line_bytes.push_back(d);
+      return 0;
+    end
+
+    if (!in_frame) return 0;
+    in_frame = 0;
+
+    if (gmii_er) begin
+      res.data.delete();
+      res.crc_ok      = 0;
+      res.preamble_ok = 0;
+      frames_seen++;
+      crc_err_count++;
+      return 1;
+    end
+    // 按 SFD 定位帧起点，容忍前导收缩：BASE-X PCS 在 tx_en 落奇数码组位
+    // 时既可顺延一拍（本实现 TX），也可丢掉一个前导字节（svt VIP 的
+    // 做法，实测约一半帧前导只有 6 字节）；802.3 要求接收端 MAC 容忍前导
+    // 收缩。故数前导 0x55（1..7 个合法），其后须为 SFD，再规整成
+    // finalize 期望的"6×0x55 + SFD"形式复用校验逻辑。
+    begin
+      int n55 = 0;
+      while (n55 < line_bytes.size() && line_bytes[n55] == ETH_PREAMBLE) n55++;
+      if (n55 >= 1 && n55 <= 7 && n55 < line_bytes.size() &&
+          line_bytes[n55] == ETH_SFD) begin
+        repeat (n55) void'(line_bytes.pop_front());   // 去掉全部前导
+        for (int i = 0; i < 6; i++) line_bytes.push_front(ETH_PREAMBLE);
+      end
+      else if (line_bytes.size() > 0) void'(line_bytes.pop_front());
+    end
+    void'(finalize(res));
+    return 1;
+  endfunction
+
+  protected bit gmii_er;
 
   // 将 line_bytes 拆成 preamble/SFD + 帧 + FCS 并校验。
   // 返回 0 仅当字节数连最小结构都不足（res 仍填充错误标志）。

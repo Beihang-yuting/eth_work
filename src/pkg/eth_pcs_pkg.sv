@@ -21,6 +21,8 @@ package eth_pcs_pkg;
   `include "pcs/mld.sv"
   `include "pcs/an_cl73.sv"
   `include "pcs/lt_cl72.sv"
+  `include "pcs/pcs_8b10b.sv"
+  `include "pcs/basex_pcs.sv"
   `include "fec/fec_cl74.sv"
   `include "fec/rs_fec_cl91.sv"
   `include "agent/eth_frame_utils.sv"

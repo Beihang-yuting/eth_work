@@ -572,6 +572,159 @@ module tb_pcs_unit;
              dec.uncorrectable_count);
   endtask
 
+  // 8b/10b：已知向量 + 全码表往返 + RD 约束 + 游程 + 逗号唯一性
+  task test_8b10b();
+    bit          rd, rd2, ke, ce, de;
+    logic [9:0]  c;
+    byte unsigned dout;
+    byte unsigned ks[5];
+    logic        bits[$];
+    int          run, maxrun, dsp, comma_hits;
+
+    // --- 已知向量（标准表）---
+    rd = 0; c = enc_8b10b(K28_5, 1, rd);
+    check("8b10b: K28.5 RD-", c == 10'b0011111010 && rd == 1);
+    rd = 1; c = enc_8b10b(K28_5, 1, rd);
+    check("8b10b: K28.5 RD+", c == 10'b1100000101 && rd == 0);
+    rd = 0; c = enc_8b10b(8'h00, 0, rd);
+    check("8b10b: D0.0 RD-", c == 10'b1001110100);
+    rd = 0; c = enc_8b10b(8'hB5, 0, rd);            // D21.5 均衡且单形
+    check("8b10b: D21.5", c == 10'b1010101010 && rd == 0);
+    rd = 0; c = enc_8b10b(K27_7, 1, rd);
+    check("8b10b: K27.7 RD-", c == 10'b1101101000);
+
+    // --- 全码表往返：256 D + 5 K × 两种入口 RD ---
+    ks = '{K28_5, K27_7, K29_7, K23_7, K30_7};
+    for (int r = 0; r < 2; r++) begin
+      for (int v = 0; v < 256; v++) begin
+        rd  = r;
+        c   = enc_8b10b(v[7:0], 0, rd);
+        rd2 = r;
+        pcs_8b10b_dec_c::decode(c, rd2, dout, ke, ce, de);
+        check("8b10b: D roundtrip", dout == v[7:0] && !ke && !ce && !de);
+        check("8b10b: D rd track", rd2 == rd);
+      end
+      foreach (ks[i]) begin
+        rd  = r;
+        c   = enc_8b10b(ks[i], 1, rd);
+        rd2 = r;
+        pcs_8b10b_dec_c::decode(c, rd2, dout, ke, ce, de);
+        check("8b10b: K roundtrip", dout == ks[i] && ke && !ce && !de);
+      end
+    end
+
+    // --- 随机长流：码组不均等性合规、游程 <= 5、D 流中无逗号 ---
+    rd = 0;
+    maxrun = 0;
+    for (int n = 0; n < 4000; n++) begin
+      c   = enc_8b10b($urandom_range(0, 255), 0, rd);
+      dsp = 0;
+      for (int i = 9; i >= 0; i--) begin
+        bits.push_back(c[i]);
+        dsp += c[i] ? 1 : -1;
+      end
+      check("8b10b: code disparity in {0,+-2}",
+            dsp == 0 || dsp == 2 || dsp == -2);
+    end
+    run = 1;
+    for (int i = 1; i < bits.size(); i++) begin
+      if (bits[i] == bits[i-1]) run++;
+      else run = 1;
+      if (run > maxrun) maxrun = run;
+    end
+    check("8b10b: run length <= 5", maxrun <= 5);
+    comma_hits = 0;
+    for (int i = 0; i + 7 <= bits.size(); i++) begin
+      logic [6:0] w;
+      for (int j = 0; j < 7; j++) w[6-j] = bits[i+j];
+      if (w == 7'b0011111 || w == 7'b1100000) comma_hits++;
+    end
+    check("8b10b: no comma in pure data stream", comma_hits == 0);
+
+    $display("[OK] 8b10b 全码表往返(256D+5K x2RD) 游程max=%0d 逗号误现=%0d",
+             maxrun, comma_hits);
+  endtask
+
+  // Clause 36 PCS：随机帧 + 随机 IPG（覆盖奇/偶位起帧）+ 随机弹性删除，
+  // GMII -> 码组 -> 比特流 -> 逗号对齐/同步/解码 -> GMII -> 帧装配比对
+  task test_basex();
+    basex_tx_c        tx = new();
+    basex_rx_c        rx = new();
+    frame_assembler_c asm = new();
+    frame_assembler_c::frame_result_t res;
+    byte unsigned     frames[$][$];
+    byte unsigned     gb[$];
+    byte unsigned     fr[$];
+    gmii_byte_t       in, out;
+    logic [9:0]       cg;
+    bit               valid;
+    int               nframes = 40, got = 0, bad = 0, ipg;
+
+    // 构造随机帧（长度 60..200）
+    for (int f = 0; f < nframes; f++) begin
+      fr.delete();
+      for (int i = 0; i < $urandom_range(60, 200); i++)
+        fr.push_back($urandom_range(0, 255));
+      frames.push_back(fr);
+    end
+
+    // 先发一段纯 idle 建同步
+    for (int n = 0; n < 40; n++) begin
+      in = '{en:0, er:0, d:8'h07};
+      tx.tick(in, cg, valid);
+      if (valid) feed_cg(rx, asm, cg, got, bad, frames);
+    end
+
+    foreach (frames[f]) begin
+      gb.delete();
+      eth_frame_to_gmii(frames[f], gb);
+      foreach (gb[i]) begin
+        in = '{en:1, er:0, d:gb[i]};
+        tx.tick(in, cg, valid);
+        if (valid) feed_cg(rx, asm, cg, got, bad, frames);
+      end
+      ipg = $urandom_range(12, 21);            // 奇偶两种 IPG 都会出现
+      for (int n = 0; n < ipg; n++) begin
+        in = '{en:0, er:0, d:8'h07};
+        if ($urandom_range(0, 3) == 0) tx.request_idle_delete();
+        tx.tick(in, cg, valid);
+        if (valid) feed_cg(rx, asm, cg, got, bad, frames);
+      end
+    end
+    // 尾部 idle 冲出最后一帧
+    for (int n = 0; n < 20; n++) begin
+      in = '{en:0, er:0, d:8'h07};
+      tx.tick(in, cg, valid);
+      if (valid) feed_cg(rx, asm, cg, got, bad, frames);
+    end
+
+    check("basex: synced", rx.is_synced());
+    check("basex: all frames", got == nframes);
+    check("basex: no bad frames", bad == 0);
+    check("basex: no code err after sync", rx.code_err_count == 0);
+    $display("[OK] basex PCS 往返 %0d 帧（随机 IPG 奇偶起帧 + 删除 %0d 次 /I/）",
+             got, tx.idle_del_count);
+  endtask
+
+  // 码组 MSB 先上线逐 bit 喂 RX；解出字节交装配器，出帧即与期望比对
+  task automatic feed_cg(basex_rx_c rx, frame_assembler_c asm, logic [9:0] cg,
+                         ref int got, ref int bad,
+                         ref byte unsigned frames[$][$]);
+    gmii_byte_t o;
+    frame_assembler_c::frame_result_t r;
+    for (int i = 9; i >= 0; i--) begin
+      if (rx.push_bit(cg[i], o)) begin
+        if (asm.push_gmii(o.en, o.er, o.d, r)) begin
+          if (got < frames.size() && r.crc_ok && r.preamble_ok &&
+              r.data == frames[got])
+            got++;
+          else
+            bad++;
+        end
+      end
+    end
+  endtask
+
   initial begin
     test_codec();
     test_scrambler();
@@ -582,6 +735,8 @@ module tb_pcs_unit;
     test_an73();
     test_lt72();
     test_rs91();
+    test_8b10b();
+    test_basex();
     $display("UNIT_TEST_PASS (%0d checks)", test_count);
     $finish;
   end

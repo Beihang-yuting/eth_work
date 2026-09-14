@@ -69,10 +69,10 @@
 | 子层 | 状态 |
 |---|---|
 | MAC Control / MAC / RS | 由 svt VIP 扮演（交叉验证），或由真实 DUT 提供 |
-| PCS | 完整自研（10G/25G/5G 单 lane + 40G MLD） |
-| FEC | Clause 74 完整；RS-FEC (cl91/108) 待做 |
+| PCS | 完整自研：BASE-R 64b/66b（10G/25G/5G 单 lane + 40G MLD）；BASE-X 8b/10b（1G/2.5G，Clause 36，MAC 侧 GMII） |
+| FEC | Clause 74 完整；RS-FEC cl91 RS(528,514) 完整（VIP 交叉随 100G） |
 | PMA | 数字核心行为级（1bit 串化 + 弹性域）；无 gearbox 并口/CDR 建模 |
-| AN | Clause 73 自协商已实现（DME 页交换 + 基页仲裁，见 §2.6）；LT(cl72) 未做 |
+| AN/LT | Clause 73 自协商 + Clause 72 链路训练已实现（KR 完整建链 AN→LT→数据，见 §2.5）；Clause 37（BASE-X AN）未做 |
 | PMD | 不建模 |
 
 即：本 agent 等效一颗"PHY 芯片"，上边 XGMII、下边 serdes 串行 lane。

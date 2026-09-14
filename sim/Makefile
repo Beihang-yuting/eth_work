@@ -81,6 +81,42 @@ multi_reset_an: loopback_simv
 	  +AN -l $(BUILD)/loopback/multi_reset_an.log
 	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_an.log
 
+# 1G / 2.5G BASE-X（8b/10b，Clause 36，MAC 侧 GMII）：同一 simv，+SPEED 切换
+loopback_1g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=1g -l $(BUILD)/loopback/run_1g.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_1g.log
+
+stress_1g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=1g -l $(BUILD)/loopback/stress_1g.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_1g.log
+
+multi_reset_1g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=1g -l $(BUILD)/loopback/multi_reset_1g.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_1g.log
+
+disturb_1g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_disturb_recovery_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=1g -l $(BUILD)/loopback/disturb_1g.log
+	grep -q "段2(恢复后) 完成 match=500" $(BUILD)/loopback/disturb_1g.log
+
+loopback_2p5g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=2.5g -l $(BUILD)/loopback/run_2p5g.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_2p5g.log
+
+stress_2p5g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=2.5g -l $(BUILD)/loopback/stress_2p5g.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_2p5g.log
+
+multi_reset_2p5g: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=2.5g -l $(BUILD)/loopback/multi_reset_2p5g.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_2p5g.log
+
 # RS-FEC（Clause 91，RS(528,514)）自环系。VIP 的 RS-FEC 只绑定 100G
 # CSBI 接口，交叉验证随 100G 多 lane 一并做
 loopback_rsfec: loopback_simv
@@ -208,6 +244,16 @@ svt_40g:
 	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=40g -l $(BUILD)/svt/run_40g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_40g.log
+
+# 1G BASE-X 与 VIP（ETH_1G_BASEX_1BIT）交叉
+svt_1g:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
+	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=1g -l $(BUILD)/svt/run_1g.log
+	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_1g.log
 
 # svt 交叉中途复位恢复：3 轮复位 × 每段 A100+B200，末段按段计数判定
 svt_25g_reset:

@@ -45,6 +45,11 @@ class eth_pcs_agent extends uvm_agent;
     // 向子组件透传同一 cfg
     uvm_config_db#(eth_pcs_cfg)::set(this, "*", "cfg", cfg);
 
+    if (cfg.basex && (cfg.fec_enable || cfg.rs_fec_enable || cfg.num_lanes > 1 ||
+                      cfg.an_enable || cfg.lt_enable || cfg.xgmii_direct))
+      `uvm_fatal("CFG", "BASE-X 模式不与 FEC/MLD/AN/LT/直驱叠加")
+    if (cfg.basex && cfg.vif_gmii == null)
+      `uvm_fatal("CFG", "BASE-X 模式需要 vif_gmii")
     if (cfg.fec_enable && cfg.rs_fec_enable)
       `uvm_fatal("CFG", "fec_enable 与 rs_fec_enable 互斥（不同的码，不叠加）")
     if (cfg.rs_fec_enable && cfg.num_lanes > 1)

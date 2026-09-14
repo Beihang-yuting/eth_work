@@ -18,6 +18,10 @@ class eth_pcs_cfg extends uvm_object;
   // FEC 使能：1 = TX/RX 走 Clause 74 编解码；0 = 裸 64b/66b + 块同步
   bit fec_enable = 0;
 
+  // BASE-X 模式（1000BASE-X / 2.5GBASE-X）：8b/10b + Clause 36 有序集，
+  // MAC 侧走 vif_gmii。与 FEC/MLD/AN/LT/直驱均不叠加（agent 校验）。
+  bit basex = 0;
+
   // RS-FEC（Clause 91，RS(528,514) over GF(2^10)）使能：与 fec_enable
   // 互斥（两者是不同的码，不叠加）。开启后 TX 走 256B/257B 转码 +
   // RS 编码，RX 反向；纠错能力 7 个 10bit 符号/码字。
@@ -64,6 +68,9 @@ class eth_pcs_cfg extends uvm_object;
 
   // 边界接口句柄：由 test 从 config_db 取得后填入
   virtual xgmii_if  vif_xgmii;
+  // BASE-X（1G/2.5G，8b/10b，Clause 36）模式的 MAC 侧接口；basex=1 时
+  // 取代 vif_xgmii（MAC 侧是 GMII 字节流而非 XGMII 64bit 拍）
+  virtual gmii_if   vif_gmii;
   virtual serial_if vif_serial;
   virtual serial_if vif_serial_lanes[MLD_MAX_LANES];
 

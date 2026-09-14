@@ -36,6 +36,30 @@ interface xgmii_if (input logic clk, input logic rst_n);
 endinterface
 
 // 串行接口：每拍 1bit，SerDes 已完成时钟恢复后的抽象视图。
+// GMII（1G/2.5G BASE-X 的 MAC 侧）：8bit 数据 + tx_en/tx_er 定帧，
+// 每字节时钟一拍（1G=125MHz，2.5G=312.5MHz）。方向与 xgmii_if 同约定。
+interface gmii_if (input logic clk, input logic rst_n);
+
+  logic [7:0] txd;
+  logic       tx_en;
+  logic       tx_er;
+
+  logic [7:0] rxd;
+  logic       rx_dv;
+  logic       rx_er;
+
+  clocking phy_cb @(posedge clk);
+    input  txd, tx_en, tx_er;
+    output rxd, rx_dv, rx_er;
+  endclocking
+
+  clocking mac_cb @(posedge clk);
+    output txd, tx_en, tx_er;
+    input  rxd, rx_dv, rx_er;
+  endclocking
+
+endinterface
+
 // 为什么每拍 1bit 而不是 66b 块：块边界物理上不存在，保留 bit 粒度才能
 // 真实验证块同步/FEC 对齐的锁定与 slip 行为（见 block_sync.sv 头注）。
 interface serial_if (input logic clk, input logic rst_n);

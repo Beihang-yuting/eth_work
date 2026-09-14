@@ -279,6 +279,23 @@ package eth_tb_pkg;
         cfg_b.xgmii_direct = 1;
       end
 
+      // 1g/2.5g：BASE-X（8b/10b，Clause 36），MAC 侧改走 GMII
+      begin
+        string speed = "10g";
+        void'($value$plusargs("SPEED=%s", speed));
+        if (speed == "1g" || speed == "2.5g") begin
+          if (fec_mode)
+            `uvm_fatal("CFG", "BASE-X 不支持 FEC 测试变体");
+          cfg_a.basex = 1;
+          cfg_b.basex = 1;
+          if (!uvm_config_db#(virtual gmii_if)::get(this, "", "vif_gmii_a",
+                                                    cfg_a.vif_gmii) ||
+              !uvm_config_db#(virtual gmii_if)::get(this, "", "vif_gmii_b",
+                                                    cfg_b.vif_gmii))
+            `uvm_fatal("CFG", "未取得 GMII 接口（lb_env 应下发 vif_gmii_a/b）")
+        end
+      end
+
       // RS-FEC（cl91）：+RSFEC 开启，与 cl74 的 fec_mode 互斥
       if ($test$plusargs("RSFEC")) begin
         if (fec_mode)
@@ -615,7 +632,9 @@ package eth_tb_pkg;
           end
         join
 
-        // 排空 + 结算：被复位毁掉的帧计 lost，凭空帧零容忍
+        // 排空 + 结算：被复位毁掉的帧计 lost，凭空帧零容忍。先等 driver
+        // 队列发空（速率无关，同扰动测试的教训）再留管线裕量
+        while (!env.agent_a.drv.is_idle()) #1us;   // 轮询，理由见扰动测试
         #50us;
         env.sb.flush_pending_as_lost();
         `uvm_info("TEST", $sformatf(
@@ -692,8 +711,14 @@ package eth_tb_pkg;
         end
       join
 
-      // 排空在途，未到帧全部按扰动损失结算
-      #100us;
+      // 排空在途，未到帧全部按扰动损失结算。排空按 driver 队列实际发空
+      // 判定（再留管线裕量），不能用固定延时：sequencer 供帧不耗时，
+      // 500 帧整批入队，1G 下线上发完约 336us，固定 100us 会把仍在
+      // 队列里的帧误结算成丢失、随后在段 2 冒出成"多余帧"（已实测）
+      // 注意必须轮询：wait(func()) 不会因函数返回值变化而重新求值
+      //（只对表达式中的变量敏感），首次为假即永久阻塞（已实测死锁）
+      while (!env.agent_a.drv.is_idle()) #1us;
+      #20us;
       env.sb.flush_pending_as_lost();
       `uvm_info("TEST", $sformatf(
         "段1(扰动) match=%0d lost=%0d bad=%0d mismatch=%0d",

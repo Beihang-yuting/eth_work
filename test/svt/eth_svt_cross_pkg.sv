@@ -76,6 +76,14 @@ package eth_svt_cross_pkg;
       enable_all_vip_components();
     endfunction
 
+    // 1000BASE-X 串行（8b/10b，tx_lane[0]，1.25Gbaud）；关 Clause 37 AN
+    //（我方 BASE-X 未实现 /C/ 配置交换，上电直接进数据态）
+    function void set_1g_cfg();
+      interface_select = ETH_1G_BASEX_1BIT;
+      enable_an37_mode = 1'b0;
+      enable_all_vip_components();
+    endfunction
+
     function void set_40g_cfg();
       interface_select = ETH_XLSBI_SERIAL;
       // AM 间隔与我方 BFM 统一为 64（VIP 默认值，合理约束仅 {64,128,256}；
@@ -317,6 +325,9 @@ package eth_svt_cross_pkg;
     // 40G（MLD）模式标志：等锁上限放宽（标准 AM 间隔对齐需 ~百 us 级）
     protected bit mld_mode = 0;
 
+    // 1G BASE-X 模式标志：我方 agent 走 GMII + 8b/10b
+    protected bit basex_mode = 0;
+
     function new(string name, uvm_component parent);
       super.new(name, parent);
     endfunction
@@ -343,9 +354,11 @@ package eth_svt_cross_pkg;
           "25g":   vip_cfg.set_25g_cfg();
           "40g":   vip_cfg.set_40g_cfg();
           "an73":  vip_cfg.set_an73_cfg();
+          "1g":    vip_cfg.set_1g_cfg();
           default: vip_cfg.set_kr_cfg();
         endcase
-        mld_mode = (speed == "40g");
+        mld_mode   = (speed == "40g");
+        basex_mode = (speed == "1g");
       end
 
       vip_cfg.mac_address[0] = 48'h000000004455;
@@ -355,6 +368,14 @@ package eth_svt_cross_pkg;
       phy_cfg.fec_enable = 0;
       phy_cfg.vif_xgmii  = vx;
       phy_cfg.vif_serial = vs;
+
+      // 1G BASE-X：MAC 侧改走 GMII
+      if (basex_mode) begin
+        phy_cfg.basex = 1;
+        if (!uvm_config_db#(virtual gmii_if)::get(this, "", "vif_gmii_p",
+                                                  phy_cfg.vif_gmii))
+          `uvm_fatal("CFG", "未取得 vif_gmii_p（top_svt 下发）")
+      end
 
       // 40G：4 lane + AM 间隔 64（与 VIP xlsbi_40g_align_timer 一致，
       // 见 set_40g_cfg 注释；必须与 VIP 一致才能互通）

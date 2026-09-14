@@ -40,12 +40,33 @@ class eth_pcs_monitor extends uvm_monitor;
     if (bfm == null)
       `uvm_fatal("BFM", "eth_pcs_monitor 未注入 phy_bfm 句柄")
 
+    if (cfg.basex) begin
+      gmii_mon_loop();
+      return;
+    end
+
     forever begin
       xgmii64_t w;
       frame_assembler_c::frame_result_t res;
 
       bfm.rx_words.get(w);
       if (asm.push_word(w, res)) begin
+        eth_frame_txn t = eth_frame_txn::type_id::create("rx_frame");
+        t.data        = res.data;
+        t.crc_ok      = res.crc_ok;
+        t.preamble_ok = res.preamble_ok;
+        rx_ap.write(t);
+      end
+    end
+  endtask
+
+  // BASE-X：逐 GMII 字节装配（rx_dv 定帧，rx_er 标损伤）
+  protected task gmii_mon_loop();
+    forever begin
+      gmii_byte_t b;
+      frame_assembler_c::frame_result_t res;
+      bfm.rx_gmii.get(b);
+      if (asm.push_gmii(b.en, b.er, b.d, res)) begin
         eth_frame_txn t = eth_frame_txn::type_id::create("rx_frame");
         t.data        = res.data;
         t.crc_ok      = res.crc_ok;

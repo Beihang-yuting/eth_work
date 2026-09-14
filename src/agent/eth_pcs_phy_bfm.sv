@@ -19,6 +19,9 @@ class eth_pcs_phy_bfm;
   // RX 还原出的 XGMII 拍：monitor 从此 mailbox 取流（引脚驱动为另一份）
   mailbox #(xgmii64_t) rx_words;
 
+  // BASE-X 模式：RX 还原出的 GMII 字节（monitor 取流用）
+  mailbox #(gmii_byte_t) rx_gmii;
+
   // 协议完整性统计（记分板/测试 check_phase 汇总）
   int invalid_block_count;   // 解码非法块（坏同步头/未知块型）
   int tx_underrun_count;     // FEC 模式串行队列空（FEC 无法按 bit 插补）
@@ -85,6 +88,16 @@ class eth_pcs_phy_bfm;
   // TX 串行 bit 队列（编码侧生产、串行侧消费）与 RX XGMII 引脚驱动队列
   protected logic     txbit_q[$];
   protected xgmii64_t rxpin_q[$];
+
+  // BASE-X（8b/10b，Clause 36）流水线：cfg.basex 时启用
+  protected basex_tx_c  btx;
+  protected basex_rx_c  brx;
+  protected gmii_byte_t rxgmii_q[$];
+  protected bit         bx_primed;
+
+  // BASE-X 弹性删除阈值：GMII 时钟 +100ppm 使码组生产略快于线路消耗，
+  // 队列超过 12 个码组即删一个 /I/（20bit）
+  localparam int BASEX_DEL_THRESH = 10 * 12;
   protected bit       tx_started;
   protected bit       tx_primed;   // 弹性垫已预灌标志（复位后重灌）
 
@@ -92,6 +105,7 @@ class eth_pcs_phy_bfm;
   // 直驱模式无串行链路，恒视为已锁 —— 既有测试的等锁流程无需适配
   function bit rx_locked();
     if (cfg.xgmii_direct) return 1;
+    if (cfg.basex) return brx.is_synced();
     if (in_an_phase() || in_lt_phase()) return 0;
     if (cfg.num_lanes > 1) return mrx.is_aligned();
     if (cfg.rs_fec_enable) return rdec.is_locked();
@@ -154,6 +168,9 @@ class eth_pcs_phy_bfm;
   function new(eth_pcs_cfg cfg);
     this.cfg  = cfg;
     rx_words  = new();
+    rx_gmii   = new();
+    btx       = new();
+    brx       = new();
     scr       = new();
     descr     = new();
     bsync     = new();
@@ -185,9 +202,18 @@ class eth_pcs_phy_bfm;
   // 启动全部通路线程；由 agent 的 run_phase fork 调用，永不返回。
   // 多 lane 时串行收发按 lane 各起一个线程
   task run();
+    // BASE-X：GMII 采样/驱动 + 单 lane 串行收发（8b/10b 码组流）
+    if (cfg.basex) begin
+      fork
+        basex_tx_loop();
+        tx_serial_loop();
+        basex_rx_loop();
+        basex_rxpin_loop();
+      join
+    end
     // 直驱模式：只需 XGMII 两个方向的采样/驱动线程，串行线程不起
     //（位钟也已由宏关掉，省掉 10G+ 事件密度 —— 提速的主要来源）
-    if (cfg.xgmii_direct) begin
+    else if (cfg.xgmii_direct) begin
       fork
         tx_sample_loop();
         rx_pin_drive_loop();
@@ -351,7 +377,7 @@ class eth_pcs_phy_bfm;
         continue;
       end
 
-      if (txbit_q.size() == 0 && tx_started && !any_fec()) begin
+      if (txbit_q.size() == 0 && tx_started && !any_fec() && !cfg.basex) begin
         $display("[PCS_TX_INS] @%0t 弹性插入（队列见底）", $time);
         push_idle_block();
       end
@@ -364,6 +390,68 @@ class eth_pcs_phy_bfm;
         cfg.vif_serial.tx_cb.tx_bit <= 1'b0;
         if (tx_started) tx_underrun_count++;
       end
+    end
+  endtask
+
+  // ---------------- BASE-X（8b/10b，Clause 36）----------------
+
+  // GMII 每字节时钟：采样一拍 -> Clause 36 TX 出一个码组（MSB 先入队）。
+  // 启动预灌 8 个 idle 码组作弹性垫；队列超阈值请求删一个 /I/。
+  protected task basex_tx_loop();
+    gmii_byte_t in;
+    logic [9:0] cg;
+    bit         valid;
+    forever begin
+      @(cfg.vif_gmii.phy_cb);
+      if (!cfg.vif_gmii.rst_n) begin
+        pipeline_reset();
+        continue;
+      end
+
+      if (!bx_primed) begin
+        repeat (8) begin
+          btx.tick('{en:0, er:0, d:8'h07}, cg, valid);
+          if (valid) for (int i = 9; i >= 0; i--) txbit_q.push_back(cg[i]);
+        end
+        bx_primed = 1;
+      end
+
+      in.en = (cfg.vif_gmii.phy_cb.tx_en === 1'b1);
+      in.er = (cfg.vif_gmii.phy_cb.tx_er === 1'b1);
+      in.d  = $isunknown(cfg.vif_gmii.phy_cb.txd) ? 8'h00
+                                                   : cfg.vif_gmii.phy_cb.txd;
+
+      if (txbit_q.size() > BASEX_DEL_THRESH) btx.request_idle_delete();
+      btx.tick(in, cg, valid);
+      if (valid) for (int i = 9; i >= 0; i--) txbit_q.push_back(cg[i]);
+    end
+  endtask
+
+  // 串行 bit -> 逗号对齐/同步/解码 -> GMII 字节（引脚队列 + monitor）
+  protected task basex_rx_loop();
+    gmii_byte_t out;
+    logic       b;
+    forever begin
+      @(cfg.vif_serial.rx_cb);
+      b = $isunknown(cfg.vif_serial.rx_cb.rx_bit) ? 1'b0
+                                                  : cfg.vif_serial.rx_cb.rx_bit;
+      if (brx.push_bit(b, out)) begin
+        rxgmii_q.push_back(out);
+        void'(rx_gmii.try_put(out));
+      end
+    end
+  endtask
+
+  // 每 GMII 字节时钟驱动一拍 RX 引脚；无数据时 rx_dv=0
+  protected task basex_rxpin_loop();
+    gmii_byte_t o;
+    forever begin
+      @(cfg.vif_gmii.phy_cb);
+      o = (rxgmii_q.size() > 0) ? rxgmii_q.pop_front()
+                                : '{en:0, er:0, d:8'h00};
+      cfg.vif_gmii.phy_cb.rxd   <= o.d;
+      cfg.vif_gmii.phy_cb.rx_dv <= o.en;
+      cfg.vif_gmii.phy_cb.rx_er <= o.er;
     end
   endtask
 
@@ -550,6 +638,10 @@ class eth_pcs_phy_bfm;
     tx_primed  = 0;
     if (cfg.an_enable) an_eng.reset();
     if (cfg.lt_enable) lt_eng.reset();
+    btx.reset();
+    brx.reset();
+    rxgmii_q.delete();
+    bx_primed = 0;
 
     if (cfg.num_lanes > 1) begin
       mtx.reset();

@@ -37,12 +37,14 @@ module top_svt;
   // 设定；test 侧读同一 plusarg 选 VIP cfg
   bit use_25g = 0;
   bit use_40g = 0;
+  bit use_1g  = 0;
 
   initial begin
     string speed = "10g";
     void'($value$plusargs("SPEED=%s", speed));
     use_25g = (speed == "25g");
     use_40g = (speed == "40g");
+    use_1g  = (speed == "1g");
   end
 
   // 自研侧字时钟：aip_clk 独立产生 156.25MHz；与 VIP 串行位时钟的微小
@@ -62,6 +64,9 @@ module top_svt;
       // 40G：4 lane 合流字率，扣 AM 间隔 64（与 VIP align_timer 一致）
       // 的带宽开销
       our_word_clk_gen.set_freq(4.0 * 10.3125e9 / 66.0 * 63.0 / 64.0);
+    else if (use_1g)
+      // 1G BASE-X：GMII 字节时钟 = 1.25Gbaud / 10 = 125MHz
+      our_word_clk_gen.set_freq(1.25e9 / 10.0);
     else
       our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0);
     // +100ppm：删除主导域（生产恒盈余，弹性删除只删帧间 idle），
@@ -71,7 +76,8 @@ module top_svt;
   end
 
   // 我方串行位时钟随速率选择（与 VIP 同源信号）
-  wire our_serial_clk = use_25g ? v_serial_25g_clk : v_serial_baser_clk;
+  wire our_serial_clk = use_25g ? v_serial_25g_clk :
+                        use_1g  ? v_sx_clk          : v_serial_baser_clk;
 
   // 复位：VIP 侧一个 gmii 时钟宽度的高脉冲（同示例 reset 序列时序）；
   // 自研侧低有效复位同窗释放
@@ -104,6 +110,11 @@ module top_svt;
   `eth_pcs_port(p, our_word_clk, our_serial_clk, our_rst_n)
 
   // 40G 模式的 4 条串行 lane（位钟同 BASE-R 10.3125G；其余模式闲置）
+  // 1G BASE-X 的 MAC 侧 GMII 口（其余模式闲置），vif 键 vif_gmii_p
+  gmii_if p_gmii (our_word_clk, our_rst_n);
+  initial uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top",
+                                               "vif_gmii_p", p_gmii);
+
   // 集成宏：lane 组声明（实例 p_l[i]，vif 键 vif_serial_p_l<i>）
   `eth_pcs_mld_lanes(p, 4, v_serial_baser_clk, our_rst_n)
 
