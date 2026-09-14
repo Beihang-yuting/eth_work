@@ -37,6 +37,9 @@ module top_svt;
   // 设定；test 侧读同一 plusarg 选 VIP cfg
   bit use_25g = 0;
   bit use_40g = 0;
+  bit use_100g = 0;
+  bit use_100g4 = 0;
+  bit use_200g = 0;
   bit use_1g  = 0;
   bit use_2p5g = 0;
 
@@ -45,6 +48,9 @@ module top_svt;
     void'($value$plusargs("SPEED=%s", speed));
     use_25g = (speed == "25g");
     use_40g = (speed == "40g");
+    use_100g = (speed == "100g");
+    use_100g4 = (speed == "100g4");
+    use_200g = (speed == "200g");
     use_1g  = (speed == "1g");
     use_2p5g = (speed == "2.5g");
   end
@@ -66,6 +72,15 @@ module top_svt;
       // 40G：4 lane 合流字率，扣 AM 间隔 64（与 VIP align_timer 一致）
       // 的带宽开销
       our_word_clk_gen.set_freq(4.0 * 10.3125e9 / 66.0 * 63.0 / 64.0);
+    else if (use_100g)
+      // 100G CAUI-10：10 条物理 lane 合流字率，扣 AM 间隔 64 开销
+      our_word_clk_gen.set_freq(10.0 * 10.3125e9 / 66.0 * 63.0 / 64.0);
+    else if (use_100g4)
+      // 100G CAUI-4：4 × 25.78125G 合流字率，扣 AM 间隔 64 开销
+      our_word_clk_gen.set_freq(4.0 * 25.78125e9 / 66.0 * 63.0 / 64.0);
+    else if (use_200g)
+      // 200G：3.125G 块/s 扣 AM+填充占用（每 16 码字 320 组中 4 组）
+      our_word_clk_gen.set_freq(3.125e9 * 316.0 / 320.0);
     else if (use_1g)
       // 1G BASE-X：GMII 字节时钟 = 1.25Gbaud / 10 = 125MHz
       our_word_clk_gen.set_freq(1.25e9 / 10.0);
@@ -121,22 +136,32 @@ module top_svt;
                                                "vif_gmii_p", p_gmii);
 
   // 集成宏：lane 组声明（实例 p_l[i]，vif 键 vif_serial_p_l<i>）
-  `eth_pcs_mld_lanes(p, 4, v_serial_baser_clk, our_rst_n)
+  // 物理 lane 位钟随模式：CAUI-4 为 25.78G，其余多 lane 为 10.3125G
+  wire p_lane_clk = use_100g4 ? v_serial_25g_clk :
+                    use_200g  ? v_scd_clk        : v_serial_baser_clk;
+  `eth_pcs_mld_lanes(p, 10, p_lane_clk, our_rst_n)
 
   // ---------------- 串行链路交叉连接 ----------------
 
   // VIP MAC 的接收线 = 我方发送；我方接收 = VIP MAC 的发送。
-  // 单 lane（10G/25G）走 lane bit0；40G 走 tx_lane[3:0]/rx_lane[3:0]。
+  // 单 lane（10G/25G）走 lane bit0；40G 走 [3:0]；100G CAUI-10 走 [9:0]。
   // rx_lane 按模式 mux（不能双驱动，故不复用 connect_svt 宏）
   assign mac_ethernet_if.rx_lane =
-    use_40g ? {'0, p_l[3].tx_bit, p_l[2].tx_bit,
-                    p_l[1].tx_bit, p_l[0].tx_bit}
-            : {'0, p_serial.tx_bit};
+    use_200g ? {'0, p_l[7].tx_bit, p_l[6].tx_bit, p_l[5].tx_bit,
+                    p_l[4].tx_bit, p_l[3].tx_bit, p_l[2].tx_bit,
+                    p_l[1].tx_bit, p_l[0].tx_bit} :
+    use_100g ? {'0, p_l[9].tx_bit, p_l[8].tx_bit, p_l[7].tx_bit,
+                    p_l[6].tx_bit, p_l[5].tx_bit, p_l[4].tx_bit,
+                    p_l[3].tx_bit, p_l[2].tx_bit, p_l[1].tx_bit,
+                    p_l[0].tx_bit} :
+    (use_40g || use_100g4) ? {'0, p_l[3].tx_bit, p_l[2].tx_bit,
+                                   p_l[1].tx_bit, p_l[0].tx_bit}
+                           : {'0, p_serial.tx_bit};
   assign p_serial.rx_bit = mac_ethernet_if.tx_lane[0];
 
   // 集成宏：多 lane 接收方向接线 + vif 下发
-  `eth_pcs_mld_rx_wire(p, mac_ethernet_if, 4)
-  `eth_pcs_mld_vifs(p, 4)
+  `eth_pcs_mld_rx_wire(p, mac_ethernet_if, 10)
+  `eth_pcs_mld_vifs(p, 10)
 
   // ---------------- TB 控制（中途复位钩子） ----------------
 
@@ -155,6 +180,24 @@ module top_svt;
 
   initial uvm_config_db#(virtual tb_ctrl_if)::set(null, "uvm_test_top",
                                                   "tb_ctrl", ctrl);
+
+  // ---------------- 多 lane 码流探针（+LANE_DUMP_NS=<ns>）----------------
+  // 把 VIP tx_lane 向量的每次跳变（时间 + 值）写入 lane_dump.txt，供离线
+  // 标定新模式（AM 图案/周期/位钟）。只在显式开启时生效。
+  initial begin
+    int dump_ns, fd;
+    if ($value$plusargs("LANE_DUMP_NS=%d", dump_ns)) begin
+      fd = $fopen("lane_dump.txt", "w");
+      fork
+        forever begin
+          @(mac_ethernet_if.tx_lane);
+          if ($realtime > dump_ns * 1ns) break;
+          $fdisplay(fd, "%0t %b", $realtime, mac_ethernet_if.tx_lane[19:0]);
+        end
+      join
+      $fclose(fd);
+    end
+  end
 
   // ---------------- UVM 启动 ----------------
 

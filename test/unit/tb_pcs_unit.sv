@@ -308,6 +308,68 @@ module tb_pcs_unit;
              sent.size());
   endtask
 
+  // 6b. MLD 100G：20 lane（表 82-3 AM）+ 随机物理乱接 + 随机偏斜闭环
+  task automatic test_mld100();
+    localparam int LANES = 20;
+    localparam int SPACING = 64;
+
+    mld_tx_c tx = new(LANES, SPACING);
+    mld_rx_c rx = new(LANES, SPACING);
+
+    block66_t sent[$];
+    block66_t got[$];
+    block66_t lane_stream[LANES][$];
+    int       perm[LANES];
+    int       skew[LANES];
+    int       cursor[LANES];
+    int       remaining, total_delivered, p, lane, j, k, tmp;
+    bit       am_v;
+    block66_t b, am_b, ob;
+
+    // 随机置换（Fisher-Yates）+ 随机起始偏斜
+    for (j = 0; j < LANES; j++) perm[j] = j;
+    for (j = LANES - 1; j > 0; j--) begin
+      k = $urandom_range(0, j);
+      tmp = perm[j]; perm[j] = perm[k]; perm[k] = tmp;
+    end
+    for (j = 0; j < LANES; j++) skew[j] = $urandom_range(0, 30);
+
+    repeat (8000) begin
+      b.sync    = ($urandom_range(0, 1)) ? SYNC_DATA : SYNC_CTRL;
+      b.payload = {$urandom, $urandom};
+      if (b.sync == SYNC_CTRL) b.payload[23:0] = 24'h5A5A5A;
+      sent.push_back(b);
+      tx.push_block(b, lane, am_v, am_b);
+      if (am_v) lane_stream[perm[lane]].push_back(am_b);
+      lane_stream[perm[lane]].push_back(b);
+    end
+
+    foreach (cursor[i]) cursor[i] = 0;
+    remaining = 0;
+    foreach (lane_stream[i]) remaining += lane_stream[i].size();
+
+    while (remaining > 0) begin
+      p = $urandom_range(0, LANES - 1);
+      total_delivered = 0;
+      for (j = 0; j < LANES; j++) total_delivered += cursor[j];
+      if (total_delivered < skew[p]) continue;
+      if (cursor[p] >= lane_stream[p].size()) continue;
+      rx.push_block(p, lane_stream[p][cursor[p]]);
+      cursor[p]++;
+      remaining--;
+      while (rx.pop_block(ob)) got.push_back(ob);
+    end
+    while (rx.pop_block(ob)) got.push_back(ob);
+
+    check("mld100: aligned", rx.is_aligned());
+    check("mld100: no realign", rx.realign_count == 0);
+    check("mld100: bip clean", rx.bip_err_count == 0);
+    check("mld100: got count", got.size() == sent.size());
+    foreach (got[i]) check("mld100: block order", got[i] == sent[i]);
+    $display("[OK] mld100 20 lane distribute/deskew/reassemble x%0d (随机乱接+偏斜)",
+             sent.size());
+  endtask
+
   // AN cl73 DME：TX 生成的电平序列经 RX 解回原页（含随机页内容）；
   // 再验仲裁 FSM 在两实例对打下双向进入 DONE
   task test_an73();
@@ -725,6 +787,172 @@ module tb_pcs_unit;
     end
   endtask
 
+  // RS(544,514)（200G KP4）：VIP 实抓黄金码字的校验符号逐位复现 +
+  // 随机纠错（t=15）与超能力判定
+  task test_rs544();
+    rs544_encoder_c enc = new();
+    rs544_decoder_c dec = new();
+    // VIP 200G（ETH_200G_SERIAL）探针实抓码字 A（544 符号）
+    rs91_sym_t gold[544] = '{
+      10'h0EC, 10'h1B7, 10'h1CC, 10'h280, 10'h18B, 10'h033, 10'h365, 10'h17B, 10'h3BE, 10'h164, 10'h081, 10'h35D, 10'h319, 10'h3A2, 10'h253, 10'h217,
+      10'h2ED, 10'h21F, 10'h0F3, 10'h274, 10'h0FE, 10'h306, 10'h3E2, 10'h1BC, 10'h330, 10'h226, 10'h0F2, 10'h0DE, 10'h0F0, 10'h276, 10'h25F, 10'h007,
+      10'h2EA, 10'h194, 10'h374, 10'h2F0, 10'h0DF, 10'h3A5, 10'h1D3, 10'h1E5, 10'h100, 10'h186, 10'h1FD, 10'h181, 10'h09F, 10'h1F4, 10'h30F, 10'h1DD,
+      10'h24A, 10'h32D, 10'h252, 10'h304, 10'h2E2, 10'h116, 10'h0B0, 10'h233, 10'h11D, 10'h335, 10'h10B, 10'h1D9, 10'h248, 10'h338, 10'h312, 10'h30E,
+      10'h147, 10'h343, 10'h160, 10'h3F0, 10'h060, 10'h1A0, 10'h2CC, 10'h3C9, 10'h00E, 10'h057, 10'h0E7, 10'h220, 10'h066, 10'h1A9, 10'h1BB, 10'h0CD,
+      10'h137, 10'h008, 10'h2A8, 10'h249, 10'h056, 10'h08E, 10'h2B9, 10'h050, 10'h17E, 10'h186, 10'h21B, 10'h2BC, 10'h16C, 10'h268, 10'h119, 10'h26F,
+      10'h016, 10'h071, 10'h190, 10'h23D, 10'h1D4, 10'h37A, 10'h065, 10'h1DE, 10'h2E8, 10'h2F6, 10'h195, 10'h281, 10'h377, 10'h145, 10'h31B, 10'h27F,
+      10'h2DC, 10'h1F9, 10'h2F1, 10'h04B, 10'h104, 10'h399, 10'h190, 10'h19F, 10'h326, 10'h2AB, 10'h3D8, 10'h11C, 10'h046, 10'h0B8, 10'h364, 10'h34D,
+      10'h19C, 10'h17F, 10'h01D, 10'h2D8, 10'h153, 10'h26A, 10'h11F, 10'h144, 10'h105, 10'h3E5, 10'h38B, 10'h3B3, 10'h23C, 10'h33B, 10'h2F2, 10'h012,
+      10'h1B7, 10'h2B5, 10'h1DF, 10'h237, 10'h046, 10'h16E, 10'h2AE, 10'h0ED, 10'h02C, 10'h3DD, 10'h32D, 10'h1E5, 10'h061, 10'h139, 10'h249, 10'h284,
+      10'h26A, 10'h0D0, 10'h094, 10'h0F2, 10'h077, 10'h058, 10'h207, 10'h0F1, 10'h195, 10'h0F9, 10'h236, 10'h319, 10'h325, 10'h201, 10'h054, 10'h3C9,
+      10'h0AA, 10'h2F0, 10'h3A7, 10'h252, 10'h337, 10'h1D0, 10'h30F, 10'h27D, 10'h1F3, 10'h2FD, 10'h1E6, 10'h202, 10'h34C, 10'h378, 10'h226, 10'h16F,
+      10'h2CD, 10'h035, 10'h13F, 10'h1A9, 10'h0D9, 10'h3BB, 10'h206, 10'h05B, 10'h2ED, 10'h1AC, 10'h160, 10'h26D, 10'h0DB, 10'h16E, 10'h0F7, 10'h081,
+      10'h220, 10'h274, 10'h034, 10'h0B2, 10'h111, 10'h014, 10'h2A4, 10'h02E, 10'h057, 10'h2BE, 10'h220, 10'h34A, 10'h3BF, 10'h12D, 10'h30C, 10'h079,
+      10'h3CD, 10'h3ED, 10'h1F0, 10'h005, 10'h32F, 10'h1FE, 10'h396, 10'h134, 10'h1B4, 10'h07F, 10'h397, 10'h152, 10'h0D4, 10'h04C, 10'h33C, 10'h212,
+      10'h38D, 10'h2E3, 10'h152, 10'h392, 10'h311, 10'h19D, 10'h36C, 10'h30A, 10'h0D1, 10'h05E, 10'h1AA, 10'h01B, 10'h1C2, 10'h367, 10'h0E3, 10'h3C1,
+      10'h2A8, 10'h0B8, 10'h0E4, 10'h0F6, 10'h23C, 10'h142, 10'h223, 10'h12E, 10'h341, 10'h21F, 10'h3EB, 10'h3DF, 10'h172, 10'h015, 10'h162, 10'h05E,
+      10'h0B4, 10'h25B, 10'h3CD, 10'h000, 10'h2B0, 10'h3F3, 10'h158, 10'h255, 10'h050, 10'h17C, 10'h3BD, 10'h3AF, 10'h080, 10'h038, 10'h28E, 10'h02C,
+      10'h349, 10'h0ED, 10'h2AF, 10'h1A4, 10'h0EC, 10'h079, 10'h31F, 10'h207, 10'h091, 10'h2C4, 10'h1C9, 10'h342, 10'h357, 10'h2D3, 10'h230, 10'h19C,
+      10'h1AC, 10'h1F2, 10'h0B1, 10'h392, 10'h324, 10'h0E5, 10'h076, 10'h3BB, 10'h102, 10'h2C0, 10'h16F, 10'h029, 10'h103, 10'h04F, 10'h31D, 10'h127,
+      10'h19D, 10'h154, 10'h287, 10'h1CD, 10'h316, 10'h047, 10'h0F8, 10'h1E6, 10'h06C, 10'h1CD, 10'h14F, 10'h1EF, 10'h2DC, 10'h3A4, 10'h295, 10'h165,
+      10'h0A3, 10'h097, 10'h008, 10'h263, 10'h021, 10'h233, 10'h088, 10'h111, 10'h2CA, 10'h3AB, 10'h121, 10'h3D7, 10'h25A, 10'h0A3, 10'h068, 10'h0C7,
+      10'h31C, 10'h079, 10'h2BF, 10'h0FB, 10'h041, 10'h3D2, 10'h01E, 10'h3F9, 10'h3ED, 10'h1FF, 10'h008, 10'h192, 10'h33B, 10'h1CB, 10'h399, 10'h22B,
+      10'h0BE, 10'h3F3, 10'h3D5, 10'h3D6, 10'h216, 10'h31C, 10'h0FE, 10'h30B, 10'h0AA, 10'h1B2, 10'h297, 10'h3DF, 10'h1A7, 10'h24A, 10'h3E4, 10'h04C,
+      10'h160, 10'h2DF, 10'h3A3, 10'h237, 10'h066, 10'h3F1, 10'h1BF, 10'h3E1, 10'h306, 10'h28F, 10'h17B, 10'h3DE, 10'h01E, 10'h1B1, 10'h3F8, 10'h1DF,
+      10'h090, 10'h011, 10'h03F, 10'h22C, 10'h31B, 10'h21D, 10'h304, 10'h2C8, 10'h34E, 10'h085, 10'h115, 10'h091, 10'h1AB, 10'h10D, 10'h2F1, 10'h3EC,
+      10'h23B, 10'h04A, 10'h3E6, 10'h3AB, 10'h1E1, 10'h225, 10'h21E, 10'h26A, 10'h046, 10'h332, 10'h2B9, 10'h048, 10'h390, 10'h38A, 10'h1DA, 10'h321,
+      10'h10F, 10'h2E6, 10'h34E, 10'h330, 10'h21E, 10'h313, 10'h1D3, 10'h30E, 10'h275, 10'h0F3, 10'h0F9, 10'h064, 10'h340, 10'h20C, 10'h3B9, 10'h3D6,
+      10'h15F, 10'h205, 10'h351, 10'h357, 10'h229, 10'h234, 10'h2E1, 10'h090, 10'h24D, 10'h2F0, 10'h002, 10'h1EB, 10'h0BD, 10'h0F5, 10'h124, 10'h054,
+      10'h2AF, 10'h263, 10'h04B, 10'h29E, 10'h0BD, 10'h0CB, 10'h3B9, 10'h14A, 10'h08E, 10'h24B, 10'h315, 10'h106, 10'h018, 10'h246, 10'h04D, 10'h024,
+      10'h2B7, 10'h201, 10'h140, 10'h1A5, 10'h120, 10'h3AE, 10'h079, 10'h29F, 10'h0D7, 10'h151, 10'h2CC, 10'h29D, 10'h232, 10'h0FD, 10'h2BE, 10'h1F0,
+      10'h261, 10'h057, 10'h069, 10'h0A3, 10'h021, 10'h34B, 10'h138, 10'h0AD, 10'h04E, 10'h118, 10'h20C, 10'h29F, 10'h140, 10'h0CC, 10'h307, 10'h332,
+      10'h0B2, 10'h258, 10'h233, 10'h029, 10'h353, 10'h17E, 10'h145, 10'h1E0, 10'h282, 10'h04A, 10'h0A9, 10'h026, 10'h075, 10'h2CE, 10'h313, 10'h3FB,
+      10'h189, 10'h162, 10'h3BE, 10'h179, 10'h3FC, 10'h2B5, 10'h0EB, 10'h2EC, 10'h3BF, 10'h2FC, 10'h056, 10'h268, 10'h014, 10'h295, 10'h3CD, 10'h1BB
+    };    rs91_sym_t data[514];
+    rs91_sym_t cw[544];
+    rs91_sym_t orig[544];
+    int pos, nerr, ok_cnt, unc_cnt, par_match;
+    bit ok, same;
+
+    // --- 黄金向量：我方编码 VIP 的信息符号，校验符号须与 VIP 完全一致 ---
+    for (int i = 0; i < 514; i++) data[i] = gold[i];
+    enc.encode(data, cw);
+    par_match = 0;
+    for (int i = 514; i < 544; i++) if (cw[i] == gold[i]) par_match++;
+    check("rs544: VIP golden parity", par_match == 30);
+    ok = dec.decode(gold);
+    check("rs544: VIP golden codeword valid", ok);
+
+    // --- 可纠：随机 1..15 个符号错 ---
+    ok_cnt = 0;
+    for (int trial = 0; trial < 12; trial++) begin
+      for (int i = 0; i < 514; i++) data[i] = $urandom_range(0, 1023);
+      enc.encode(data, cw);
+      foreach (cw[i]) orig[i] = cw[i];
+      nerr = $urandom_range(1, 15);
+      for (int e = 0; e < nerr; e++) begin
+        pos     = $urandom_range(0, 543);
+        cw[pos] = cw[pos] ^ 10'($urandom_range(1, 1023));
+      end
+      ok = dec.decode(cw);
+      same = 1;
+      foreach (cw[i]) if (cw[i] != orig[i]) same = 0;
+      if (ok && same) ok_cnt++;
+    end
+    check("rs544: correctable trials", ok_cnt == 12);
+
+    // --- 超能力：注 24 个符号错须判不可纠 ---
+    unc_cnt = 0;
+    for (int trial = 0; trial < 6; trial++) begin
+      for (int i = 0; i < 514; i++) data[i] = $urandom_range(0, 1023);
+      enc.encode(data, cw);
+      for (int e = 0; e < 24; e++) cw[e*22] = cw[e*22] ^ 10'($urandom_range(1, 1023));
+      if (!dec.decode(cw)) unc_cnt++;
+    end
+    check("rs544: uncorrectable detected", unc_cnt >= 5);
+    $display("[OK] rs544 RS(544,514) VIP 黄金码字校验位 %0d/30 一致, 纠错 %0d/12, 不可纠 %0d/6",
+             par_match, ok_cnt, unc_cnt);
+  endtask
+
+  // Clause 119（200G）：随机块流 TX -> 8 lane（随机偏斜 + 物理乱接）-> RX
+  task automatic test_cl119();
+    c119_tx_c tx = new();
+    c119_rx_c rx = new();
+    block66_t sent[$], got[$], b, ob;
+    logic     lane_bits[C119_LANES][$];
+    int       perm[C119_LANES], skew[C119_LANES], cur[C119_LANES];
+    byte unsigned bts[8];
+    int       j, k, tmp, remaining, first, match, nblk;
+
+    bts = '{8'h1E, 8'h78, 8'h87, 8'hFF, 8'h4B, 8'h99, 8'hB4, 8'h33};
+    nblk = 1264 * 4;                 // 4 个 AM 周期
+    for (int n = 0; n < nblk; n++) begin
+      if ($urandom_range(0, 2) == 0) begin
+        b.sync    = SYNC_CTRL;
+        b.payload = {$urandom, $urandom};
+        b.payload[7:0] = bts[$urandom_range(0, 7)];
+      end
+      else begin
+        b.sync    = SYNC_DATA;
+        b.payload = {$urandom, $urandom};
+      end
+      sent.push_back(b);
+      if (tx.push_block(b))
+        for (int l = 0; l < C119_LANES; l++) begin
+          while (tx.out_bits[l].size() > 0)
+            lane_bits[l].push_back(tx.out_bits[l].pop_front());
+        end
+    end
+
+    // 物理乱接 + 各 lane 前置随机偏斜（随机垃圾比特）
+    for (j = 0; j < C119_LANES; j++) perm[j] = j;
+    for (j = C119_LANES - 1; j > 0; j--) begin
+      k = $urandom_range(0, j);
+      tmp = perm[j]; perm[j] = perm[k]; perm[k] = tmp;
+    end
+    for (j = 0; j < C119_LANES; j++) begin
+      skew[j] = $urandom_range(0, 400);
+      cur[j]  = 0;
+    end
+
+    remaining = 0;
+    foreach (lane_bits[l]) remaining += lane_bits[l].size();
+    // 逐 bit 交错投递（物理 lane p 承载逻辑 lane perm[p]）
+    while (remaining > 0) begin
+      for (int p = 0; p < C119_LANES; p++) begin
+        int ll = perm[p];
+        if (skew[p] > 0) begin
+          rx.push_bit(p, $urandom_range(0, 1));
+          skew[p]--;
+        end
+        else if (cur[ll] < lane_bits[ll].size()) begin
+          rx.push_bit(p, lane_bits[ll][cur[ll]]);
+          cur[ll]++;
+          remaining--;
+        end
+      end
+    end
+    while (rx.pop_block(ob)) got.push_back(ob);
+
+    // RX 从某个 AM 周期起交付：在发送序列中定位首块后逐一比对
+    first = -1;
+    for (int i = 0; i + 8 < sent.size() && first < 0; i++) begin
+      bit same = 1;
+      for (int q = 0; q < 8; q++) if (sent[i+q] != got[q]) same = 0;
+      if (same) first = i;
+    end
+    check("cl119: aligned", rx.is_aligned());
+    check("cl119: got blocks", got.size() > 1000);
+    check("cl119: locate", first >= 0);
+    match = 0;
+    for (int i = 0; i < got.size() && first + i < sent.size(); i++)
+      if (got[i] == sent[first + i]) match++;
+    check("cl119: all blocks match", match == got.size());
+    check("cl119: no rs error", rx.rs_uncorrectable == 0);
+    $display("[OK] cl119 200G 8 lane TX->RX %0d 块全对（随机乱接+偏斜）, AM锁 %0d",
+             match, rx.am_locks);
+  endtask
+
   initial begin
     test_codec();
     test_scrambler();
@@ -732,9 +960,12 @@ module tb_pcs_unit;
     test_fec();
     test_frame_utils();
     test_mld();
+    test_mld100();
     test_an73();
     test_lt72();
     test_rs91();
+    test_rs544();
+    test_cl119();
     test_8b10b();
     test_basex();
     $display("UNIT_TEST_PASS (%0d checks)", test_count);

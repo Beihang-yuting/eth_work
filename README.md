@@ -14,7 +14,8 @@ aip_clk（vendored 于 third_party/aip_core，精度提到 1fs），字/位时�
   层级图 + MAC-only/MAC+PHY 两形态业务报文发送方法）
 - 集成/使用（每模式一份）：`docs/integration_10g_basekr.md`、
   `docs/integration_25g_5g.md`、`docs/integration_40g.md`、
-  `docs/integration_1g_2p5g.md`（1G/2.5G BASE-X，8b/10b + GMII）
+  `docs/integration_1g_2p5g.md`（1G/2.5G BASE-X，8b/10b + GMII）、
+  `docs/integration_100g_200g.md`（100G CAUI-10/CAUI-4、200G Clause 119）
 - 可跑示例（每模式一份）：`examples/10g_basekr_loopback/`、
   `examples/25g_loopback/`、`examples/40g_loopback/`
 

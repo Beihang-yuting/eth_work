@@ -69,59 +69,57 @@ class rs91_gf_c;
 
 endclass
 
-// 生成多项式 g(x) = Π_{i=0..13} (x - α^i)，g[0..14]（g[14]=1）
-function automatic void rs91_gen_poly(output rs91_sym_t g[RS91_PARITY+1]);
-  rs91_sym_t tmp[RS91_PARITY+1];
-  foreach (g[i]) g[i] = '0;
-  g[0] = 1;
-  for (int i = 0; i < RS91_PARITY; i++) begin
-    foreach (tmp[j]) tmp[j] = '0;
-    for (int j = 0; j <= i; j++) begin
-      tmp[j+1] = tmp[j+1] ^ g[j];                                     // *x
-      tmp[j]   = tmp[j]   ^ rs91_gf_c::mul(g[j],
-                                           rs91_gf_c::alpha_pow(i));  // *α^i
-    end
-    foreach (g[j]) g[j] = tmp[j];
-  end
-endfunction
+// ---------------- 参数化 RS(N,K) over GF(2^10) ----------------
+//
+// cl91 用 RS(528,514)（t=7），200GBASE-R（Clause 119）用 RS(544,514)
+//（KP4，t=15）。生成多项式 g(x) = Π_{i=0..P-1} (x - α^i)，P = N-K；
+// 系统码：cw[0..K-1] = 信息符号，cw[K..N-1] = 校验符号（余数高位在前）。
 
-// ---------------- 编码 ----------------
+class rs10_encoder_c #(int N = 528, int K = 514);
 
-class rs91_encoder_c;
+  localparam int P = N - K;
 
-  protected rs91_sym_t g[RS91_PARITY+1];
+  protected rs91_sym_t g[P+1];
 
   function new();
+    rs91_sym_t tmp[P+1];
     rs91_gf_c::build();
-    rs91_gen_poly(g);
+    foreach (g[i]) g[i] = '0;
+    g[0] = 1;
+    for (int i = 0; i < P; i++) begin
+      foreach (tmp[j]) tmp[j] = '0;
+      for (int j = 0; j <= i; j++) begin
+        tmp[j+1] = tmp[j+1] ^ g[j];                                    // *x
+        tmp[j]   = tmp[j]   ^ rs91_gf_c::mul(g[j],
+                                             rs91_gf_c::alpha_pow(i)); // *α^i
+      end
+      foreach (g[j]) g[j] = tmp[j];
+    end
   endfunction
 
-  // 系统编码：cw[0..513] = 信息符号，cw[514..527] = 校验符号
-  function void encode(input rs91_sym_t data[RS91_K],
-                       output rs91_sym_t cw[RS91_N]);
-    rs91_sym_t par[RS91_PARITY];
+  function void encode(input rs91_sym_t data[K], output rs91_sym_t cw[N]);
+    rs91_sym_t par[P];
     rs91_sym_t fb;
 
     foreach (par[i]) par[i] = '0;
-
     // LFSR 除法：逐个信息符号移入，par 保持余数
-    for (int i = 0; i < RS91_K; i++) begin
-      fb = data[i] ^ par[RS91_PARITY-1];
-      for (int j = RS91_PARITY-1; j > 0; j--)
+    for (int i = 0; i < K; i++) begin
+      fb = data[i] ^ par[P-1];
+      for (int j = P-1; j > 0; j--)
         par[j] = par[j-1] ^ rs91_gf_c::mul(fb, g[j]);
       par[0] = rs91_gf_c::mul(fb, g[0]);
     end
 
-    for (int i = 0; i < RS91_K; i++) cw[i] = data[i];
-    for (int i = 0; i < RS91_PARITY; i++)
-      cw[RS91_K + i] = par[RS91_PARITY-1-i];   // 余数高位在前
+    for (int i = 0; i < K; i++) cw[i] = data[i];
+    for (int i = 0; i < P; i++) cw[K + i] = par[P-1-i];   // 余数高位在前
   endfunction
 
 endclass
 
-// ---------------- 译码 ----------------
+class rs10_decoder_c #(int N = 528, int K = 514);
 
-class rs91_decoder_c;
+  localparam int P = N - K;
+  localparam int T = P / 2;
 
   // 统计
   int corrected_count;      // 成功纠正的码字数
@@ -141,24 +139,23 @@ class rs91_decoder_c;
 
   // 就地纠正 cw；返回 1 = 码字有效（无错或已纠正），
   // 0 = 超出纠错能力（cw 不保证正确，上层按不可纠处理）
-  function bit decode(ref rs91_sym_t cw[RS91_N]);
-    rs91_sym_t synd[RS91_PARITY];
-    rs91_sym_t lambda[RS91_T+1];
-    rs91_sym_t bpoly[RS91_T+1];
-    rs91_sym_t tpoly[RS91_T+1];
-    rs91_sym_t omega[RS91_PARITY];
-    int        err_pos[RS91_T];
+  function bit decode(ref rs91_sym_t cw[N]);
+    rs91_sym_t synd[P];
+    rs91_sym_t lambda[T+1];
+    rs91_sym_t bpoly[T+1];
+    rs91_sym_t tpoly[T+1];
+    rs91_sym_t omega[P];
+    int        err_pos[T];
     rs91_sym_t err_val, delta, d, dinv, xi, num, den, tmp;
     int        L, m, nerr, pw;
     bit        has_err;
 
-    // --- 伴随式 S_i = cw(α^i)，i = 0..13 ---
+    // --- 伴随式 S_i = cw(α^i)，i = 0..P-1 ---
     has_err = 0;
-    for (int i = 0; i < RS91_PARITY; i++) begin
+    for (int i = 0; i < P; i++) begin
       tmp = '0;
-      for (int j = 0; j < RS91_N; j++)
-        tmp = tmp ^ rs91_gf_c::mul(cw[j],
-                     rs91_gf_c::alpha_pow(i * (RS91_N-1-j)));
+      for (int j = 0; j < N; j++)
+        tmp = tmp ^ rs91_gf_c::mul(cw[j], rs91_gf_c::alpha_pow(i * (N-1-j)));
       synd[i] = tmp;
       if (tmp != 0) has_err = 1;
     end
@@ -173,7 +170,7 @@ class rs91_decoder_c;
     m = 1;
     d = 1;
 
-    for (int n = 0; n < RS91_PARITY; n++) begin
+    for (int n = 0; n < P; n++) begin
       delta = synd[n];
       for (int i = 1; i <= L; i++)
         delta = delta ^ rs91_gf_c::mul(lambda[i], synd[n-i]);
@@ -184,7 +181,7 @@ class rs91_decoder_c;
       else if (2*L <= n) begin
         foreach (tpoly[i]) tpoly[i] = lambda[i];
         dinv = rs91_gf_c::div(delta, d);
-        for (int i = 0; i + m <= RS91_T; i++)
+        for (int i = 0; i + m <= T; i++)
           lambda[i+m] = lambda[i+m] ^ rs91_gf_c::mul(dinv, bpoly[i]);
         L = n + 1 - L;
         foreach (bpoly[i]) bpoly[i] = tpoly[i];
@@ -193,26 +190,26 @@ class rs91_decoder_c;
       end
       else begin
         dinv = rs91_gf_c::div(delta, d);
-        for (int i = 0; i + m <= RS91_T; i++)
+        for (int i = 0; i + m <= T; i++)
           lambda[i+m] = lambda[i+m] ^ rs91_gf_c::mul(dinv, bpoly[i]);
         m++;
       end
     end
 
-    if (L > RS91_T) begin
+    if (L > T) begin
       uncorrectable_count++;
       return 0;
     end
 
     // --- Chien 搜索：lambda(α^-pw) == 0 的位置即错误位置 ---
     nerr = 0;
-    for (int j = 0; j < RS91_N; j++) begin
-      pw  = RS91_N - 1 - j;
+    for (int j = 0; j < N; j++) begin
+      pw  = N - 1 - j;
       tmp = lambda[0];
       for (int i = 1; i <= L; i++)
         tmp = tmp ^ rs91_gf_c::mul(lambda[i], rs91_gf_c::alpha_pow(-i * pw));
       if (tmp == 0) begin
-        if (nerr >= RS91_T) begin
+        if (nerr >= T) begin
           uncorrectable_count++;
           return 0;
         end
@@ -227,30 +224,28 @@ class rs91_decoder_c;
       return 0;
     end
 
-    // --- omega(x) = S(x)·lambda(x) mod x^(2t) ---
+    // --- omega(x) = S(x)·lambda(x) mod x^P ---
     foreach (omega[i]) omega[i] = '0;
-    for (int i = 0; i < RS91_PARITY; i++)
+    for (int i = 0; i < P; i++)
       for (int j = 0; j <= L; j++)
-        if (i + j < RS91_PARITY)
+        if (i + j < P)
           omega[i+j] = omega[i+j] ^ rs91_gf_c::mul(synd[i], lambda[j]);
 
-    // --- Forney：e = omega(X^-1) / lambda'(X^-1) ---
+    // --- Forney：e = X·omega(X^-1) / lambda'(X^-1)（根从 α^0 起，b0=0）---
     for (int k = 0; k < nerr; k++) begin
-      pw  = RS91_N - 1 - err_pos[k];
+      pw  = N - 1 - err_pos[k];
       xi  = rs91_gf_c::alpha_pow(pw);
       num = '0;
-      for (int i = 0; i < RS91_PARITY; i++)
+      for (int i = 0; i < P; i++)
         num = num ^ rs91_gf_c::mul(omega[i], rs91_gf_c::alpha_pow(-i * pw));
       // GF(2) 上导数只保留奇次项
       den = '0;
       for (int i = 1; i <= L; i += 2)
-        den = den ^ rs91_gf_c::mul(lambda[i],
-                     rs91_gf_c::alpha_pow(-(i-1) * pw));
+        den = den ^ rs91_gf_c::mul(lambda[i], rs91_gf_c::alpha_pow(-(i-1) * pw));
       if (den == 0) begin
         uncorrectable_count++;
         return 0;
       end
-      // 生成多项式根从 α^0 起（b0=0），故错值 e = X·ω(X⁻¹)/λ'(X⁻¹)，
       // X_k 因子不可省（漏乘会得到错误的错值，纠错后码字仍不对）
       err_val        = rs91_gf_c::mul(xi, rs91_gf_c::div(num, den));
       cw[err_pos[k]] = cw[err_pos[k]] ^ err_val;
@@ -262,6 +257,12 @@ class rs91_decoder_c;
   endfunction
 
 endclass
+
+// cl91 RS(528,514) 与 200G KP4 RS(544,514) 的特化名
+typedef rs10_encoder_c #(528, 514) rs91_encoder_c;
+typedef rs10_decoder_c #(528, 514) rs91_decoder_c;
+typedef rs10_encoder_c #(544, 514) rs544_encoder_c;
+typedef rs10_decoder_c #(544, 514) rs544_decoder_c;
 
 // ---------------- 256B/257B 转码（Clause 91.5.2.5）----------------
 //

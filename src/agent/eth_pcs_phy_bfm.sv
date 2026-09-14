@@ -53,6 +53,7 @@ class eth_pcs_phy_bfm;
 
   // 当前模式的删除阈值
   function int del_thresh();
+    if (cfg.cl119)         return C119_DEL_THRESH;
     if (cfg.rs_fec_enable) return IDLE_DEL_THRESH_RS;
     return cfg.fec_enable ? IDLE_DEL_THRESH_FEC : IDLE_DEL_THRESH;
   endfunction
@@ -85,6 +86,31 @@ class eth_pcs_phy_bfm;
   protected block_sync_c bsync_l[MLD_MAX_LANES];
   protected logic        txbit_lq[MLD_MAX_LANES][$];
 
+  // 200G（Clause 119）引擎：cfg.cl119 时启用，取代 MLD
+  protected c119_tx_c c119tx;
+  protected c119_rx_c c119rx;
+
+  // 200G 弹性删除阈值：TX 以码字对为粒度突发产出（每 lane 1360bit，
+  // 对应 40 个 257b 组 = 160 块），阈值须不低于 2 对，取 3 对
+  localparam int C119_DEL_THRESH = C119_LANE_PAIR * 3;
+
+  // 66b 级是否不加扰（RS-FEC cl91 与 200G 均在更高层加扰，见各自注释）
+  function bit no66scr();
+    return cfg.rs_fec_enable || cfg.cl119;
+  endfunction
+
+  // PMA bit 复用轮转指针（每物理 lane 一个；m=1 时恒 0）
+  protected int          tx_rot[MLD_MAX_LANES];
+  protected int          rx_rot[MLD_MAX_LANES];
+
+  // 物理 lane 数与复用比
+  function int nphys();
+    return (cfg.num_phys > 0) ? cfg.num_phys : cfg.num_lanes;
+  endfunction
+  function int mux_ratio();
+    return cfg.num_lanes / nphys();
+  endfunction
+
   // TX 串行 bit 队列（编码侧生产、串行侧消费）与 RX XGMII 引脚驱动队列
   protected logic     txbit_q[$];
   protected xgmii64_t rxpin_q[$];
@@ -107,6 +133,7 @@ class eth_pcs_phy_bfm;
     if (cfg.xgmii_direct) return 1;
     if (cfg.basex) return brx.is_synced();
     if (in_an_phase() || in_lt_phase()) return 0;
+    if (cfg.cl119) return c119rx.is_aligned();
     if (cfg.num_lanes > 1) return mrx.is_aligned();
     if (cfg.rs_fec_enable) return rdec.is_locked();
     return cfg.fec_enable ? fdec.is_locked() : bsync.is_locked();
@@ -197,6 +224,8 @@ class eth_pcs_phy_bfm;
       mrx = new(cfg.num_lanes, cfg.am_spacing);
       foreach (bsync_l[i]) bsync_l[i] = new();
     end
+    c119tx = new();
+    c119rx = new();
   endfunction
 
   // 启动全部通路线程；由 agent 的 run_phase fork 调用，永不返回。
@@ -224,7 +253,7 @@ class eth_pcs_phy_bfm;
         tx_sample_loop();
         rx_pin_drive_loop();
       join_none
-      for (int i = 0; i < cfg.num_lanes; i++) begin
+      for (int i = 0; i < nphys(); i++) begin
         automatic int li = i;
         fork
           tx_serial_lane_loop(li);
@@ -274,7 +303,16 @@ class eth_pcs_phy_bfm;
       // 首拍先灌弹性垫（经扰码器，保持码流顺序连续）。
       // 多 lane 时垫必须走 MLD 正常分发路径，保证轮转/AM 计数一致
       if (!tx_primed) begin
-        if (cfg.num_lanes > 1) begin
+        if (cfg.cl119) begin
+          block66_t ib;
+          ib.sync    = SYNC_CTRL;
+          ib.payload = {56'h0, BT_CTRL};
+          // 预灌 3 个完整码字对（首对 36 组=144 块，其余每对 40 组=160 块）：
+          // 首对块数少于后续对，首对发完后生产下一对（160 字钟）慢于 lane
+          // 放完一对，须有整对余量垫底，否则断流插 0 毁掉后续码字（已实测）
+          repeat (144 + 160 + 160) if (c119tx.push_block(ib)) c119_drain();
+        end
+        else if (cfg.num_lanes > 1) begin
           repeat (PRIME_BLOCKS * cfg.num_lanes) begin
             block66_t ib;
             int lane;
@@ -329,9 +367,12 @@ class eth_pcs_phy_bfm;
         // 再加扰"，而转码要读未加扰的块类型字段；跳变密度由码字级
         // PN 加扰（rs91_pn_xor）保证。加扰在前会让转码读到乱码块类型，
         // 查表失配 -> 整条码流报废（已实测）。
-        if (!cfg.rs_fec_enable) blk.payload = scr.scramble(blk.payload);
+        if (!no66scr()) blk.payload = scr.scramble(blk.payload);
 
-        if (cfg.num_lanes > 1) begin
+        if (cfg.cl119) begin
+          if (c119tx.push_block(blk)) c119_drain();
+        end
+        else if (cfg.num_lanes > 1) begin
           // MLD 分发：AM 先行入该 lane 队列，数据块随后
           int lane;
           bit amv;
@@ -455,6 +496,13 @@ class eth_pcs_phy_bfm;
     end
   endtask
 
+  // 200G：把 c119 TX 本次产出的各逻辑 lane 比特搬入串行队列
+  protected function void c119_drain();
+    for (int l = 0; l < C119_LANES; l++)
+      while (c119tx.out_bits[l].size() > 0)
+        txbit_lq[l].push_back(c119tx.out_bits[l].pop_front());
+  endfunction
+
   // 66b 块按线路发送序压入指定 bit 队列。
   // 同步头发送顺序（802.3 惯例，与 svt VIP 实测一致）：数据块 "01"
   // 先发 0、控制块 "10" 先发 1，即先发 sync[1] 再 sync[0]
@@ -467,11 +515,16 @@ class eth_pcs_phy_bfm;
   // 多 lane 串行发送线程：每 bit 时钟从本 lane 队列出 1 bit。
   // 多 lane 域约定生产恒盈余（字钟 +100ppm），队列空仅发生在启动
   // 瞬态（发 0，对端搜索期无害）；稳态断流计 underrun 暴露
+  // li 为物理 lane；PMA 复用时逐 bit 轮转取下属 PCS lane p*m+k 的队列
   protected task tx_serial_lane_loop(int li);
+    int m, pcs;
     forever begin
       @(cfg.vif_serial_lanes[li].tx_cb);
-      if (txbit_lq[li].size() > 0) begin
-        cfg.vif_serial_lanes[li].tx_cb.tx_bit <= txbit_lq[li].pop_front();
+      m   = mux_ratio();
+      pcs = li * m + tx_rot[li];
+      tx_rot[li] = (tx_rot[li] + 1) % m;
+      if (txbit_lq[pcs].size() > 0) begin
+        cfg.vif_serial_lanes[li].tx_cb.tx_bit <= txbit_lq[pcs].pop_front();
         tx_started = 1;
       end
       else begin
@@ -483,18 +536,29 @@ class eth_pcs_phy_bfm;
 
   // 多 lane 串行接收线程：本 lane 块同步 -> 锁定块交 MLD ->
   // 重组出的块走公共交付路径
+  // li 为物理 lane；PMA 解复用逐 bit 轮转分发到下属 PCS 流 p*m+k。
+  // 解复用相位任意：各流独立块同步，哪条流是哪条 PCS lane 由 MLD 按
+  // AM 自识别（与 TX 映射无关，对端复用映射不同也能收）
   protected task rx_serial_lane_loop(int li);
+    int m, pcs;
+    logic b;
+    block66_t blk, ob;
     forever begin
       @(cfg.vif_serial_lanes[li].rx_cb);
-      begin
-        logic b = $isunknown(cfg.vif_serial_lanes[li].rx_cb.rx_bit)
-                  ? 1'b0 : cfg.vif_serial_lanes[li].rx_cb.rx_bit;
-        block66_t blk;
-        if (bsync_l[li].push_bit(b, blk) && bsync_l[li].is_locked()) begin
-          block66_t ob;
-          mrx.push_block(li, blk);
-          while (mrx.pop_block(ob)) deliver_block(ob);
-        end
+      m   = mux_ratio();
+      pcs = li * m + rx_rot[li];
+      rx_rot[li] = (rx_rot[li] + 1) % m;
+      b = $isunknown(cfg.vif_serial_lanes[li].rx_cb.rx_bit)
+          ? 1'b0 : cfg.vif_serial_lanes[li].rx_cb.rx_bit;
+      if (cfg.cl119) begin
+        c119rx.push_bit(li, b);
+        while (c119rx.pop_block(ob)) deliver_block(ob);
+        continue;
+      end
+      if (bsync_l[pcs].push_bit(b, blk) && bsync_l[pcs].is_locked()) begin
+        mrx.push_block(pcs, blk);
+        if (!mrx.is_aligned()) rx_warm = 1;
+        while (mrx.pop_block(ob)) deliver_block(ob);
       end
     end
   endtask
@@ -552,6 +616,8 @@ class eth_pcs_phy_bfm;
           block66_t blk;
           if (bsync.push_bit(b, blk) && bsync.is_locked())
             deliver_block(blk);
+          else if (!bsync.is_locked())
+            rx_warm = 1;
         end
       end
     end
@@ -567,10 +633,24 @@ class eth_pcs_phy_bfm;
   protected realtime rx_dump_from = 0;
 
   // 单块后处理：解扰 -> 解码 -> 双路递交
+  // 解扰器热身：锁定/对齐后交付的第一个块由陈旧解扰状态解出（自同步
+  // 解扰须先吃进 58bit 新输入），净荷必为乱码 —— 多数解成非法块（启动
+  // 期常见的 invalid=1），但可能恰好解成合法帧起始块、后接 idle 而被
+  // 报成 len=0 损伤帧（100G 对齐时两个方向各出现一次，已实测）。故该块
+  // 只喂解扰器更新状态，向上以 idle 代替。
+  protected bit rx_warm = 1;
+
   protected function void deliver_block(block66_t blk);
     xgmii64_t w;
     // 与 TX 对称：RS-FEC 模式不做 66b 级解扰（见 tx_sample_loop 注释）
-    if (!cfg.rs_fec_enable) blk.payload = descr.descramble(blk.payload);
+    if (!no66scr()) blk.payload = descr.descramble(blk.payload);
+    if (rx_warm && !no66scr()) begin
+      rx_warm = 0;
+      w = xgmii_all_idle();
+      void'(rx_words.try_put(w));
+      rxpin_q.push_back(w);
+      return;
+    end
     if (!pcs_codec::decode(blk, w)) begin
       invalid_block_count++;
       if (invalid_dump_left > 0) begin
@@ -642,12 +722,17 @@ class eth_pcs_phy_bfm;
     brx.reset();
     rxgmii_q.delete();
     bx_primed = 0;
+    rx_warm   = 1;
 
+    c119tx.reset();
+    c119rx.reset();
     if (cfg.num_lanes > 1) begin
       mtx.reset();
       mrx.reset();
       foreach (bsync_l[i]) bsync_l[i].reset();
       foreach (txbit_lq[i]) txbit_lq[i].delete();
+      foreach (tx_rot[i]) tx_rot[i] = 0;
+      foreach (rx_rot[i]) rx_rot[i] = 0;
     end
   endfunction
 

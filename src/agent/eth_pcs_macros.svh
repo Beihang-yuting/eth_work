@@ -39,19 +39,30 @@
   wire name``_bit_clk  = name``_bit_clk_if.clk; \
   initial begin \
     string speed_s = "10g"; \
-    int    am_sp = 512; \
+    int    am_sp; \
     real   bit_hz, word_hz; \
     void'($value$plusargs("SPEED=%s", speed_s)); \
+    am_sp = (speed_s == "100g" || speed_s == "100g4") ? 64 : 512; \
     void'($value$plusargs("AM_SPACING=%d", am_sp)); \
     case (speed_s) \
       "25g":   bit_hz = 25.78125e9; \
       "5g":    bit_hz = 5.15625e9; \
       "1g":    bit_hz = 1.25e9; \
       "2.5g":  bit_hz = 3.125e9; \
+      "100g4": bit_hz = 25.78125e9; \
+      "200g":  bit_hz = 26.5625e9; \
       default: bit_hz = 10.3125e9; \
     endcase \
     if (speed_s == "40g") \
       word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
+    else if (speed_s == "100g") \
+      word_hz = bit_hz * 10.0 / 66.0 * (am_sp - 1.0) / am_sp; \
+    else if (speed_s == "100g4") \
+      word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
+    else if (speed_s == "200g") \
+      /* 8 lane × 26.5625G，RS(544,514)+257b 后净 200G = 3.125G 块/s；AM */ \
+      /* 周期 16 码字中 4/320 块位让给 AM+填充 -> ×316/320 */ \
+      word_hz = 3.125e9 * 316.0 / 320.0; \
     else if (speed_s == "1g" || speed_s == "2.5g") \
       word_hz = bit_hz / 10.0; \
     else \
@@ -99,6 +110,8 @@
   end
 
 // svt ethernet VIP 全套接口时钟：一键生成全部时钟信号 + 翻转 + 接线。
+// 覆盖 VIP svt_ethernet_txrx_if 的全部时钟端口（2026-09-15 逐一对照补齐
+// 33 路，此前漏接的 ccmii 等恰为 200G 所需）。
 // 周期值取自 VIP 25G 示例 top；+SPEED=2.5g 时 GMII/XGMII/basex 串行三路
 // 改为 2.5GBASE-X 频率（VIP 在该模式直接以 serial_basex_clk 为位钟，
 // 已用波形探针实测确认）。必须全接 —— 只接子集会导致某些
@@ -115,7 +128,17 @@
   bit pfx``_66t_clk, pfx``_40t_clk, pfx``_s4x_clk, pfx``_sx_clk; \
   bit pfx``_grmii_clk, pfx``_rmii_clk, pfx``_m100_clk, pfx``_m10_clk; \
   bit pfx``_tbi_clk, pfx``_mdio_clk; \
+  /* 以下为补齐的 33 路（VIP txrx_if 全部时钟端口逐一对照）*/ \
+  bit pfx``_caui64b_clk, pfx``_ccmii_clk, pfx``_cdmii_clk, pfx``_cdxbi_clk; \
+  bit pfx``_dcccmii_clk, pfx``_lsbi1_clk, pfx``_ptp_clk, pfx``_rgmii_clk; \
+  bit pfx``_rxaui_clk, pfx``_srxaui_clk, pfx``_s100bt1_clk, pfx``_sbt1_clk; \
+  bit pfx``_smii_clk, pfx``_s100g_clk, pfx``_s50g_clk, pfx``_s100g1_clk; \
+  bit pfx``_s50g1_clk; \
   realtime pfx``_gmii_half = 4000, pfx``_xgmii_half = 3200, pfx``_sx_half = 400; \
+  /* 超高速串行钟（半周期 4.7~9.7ps）默认慢速翻转：只保证"在转"防 VIP */ \
+  /* 假死，避免拖慢所有 svt 仿真；接对应模式时由 +SPEED 切真实频率 */ \
+  realtime pfx``_s100g_half = 4000, pfx``_s50g_half = 4000; \
+  realtime pfx``_s100g1_half = 4000, pfx``_s50g1_half = 4000; \
   initial begin \
     string sp_s; \
     if ($value$plusargs("SPEED=%s", sp_s) && sp_s == "2.5g") begin \
@@ -150,7 +173,24 @@
   always #20000      pfx``_m100_clk      = ~pfx``_m100_clk; \
   always #200000     pfx``_m10_clk       = ~pfx``_m10_clk; \
   always #4000       pfx``_tbi_clk       = ~pfx``_tbi_clk; \
-  always #200        pfx``_mdio_clk      = ~pfx``_mdio_clk;
+  always #200        pfx``_mdio_clk      = ~pfx``_mdio_clk; \
+  always #(2482.424/2.0) pfx``_caui64b_clk = ~pfx``_caui64b_clk; /* 示例值 */ \
+  always #160        pfx``_ccmii_clk     = ~pfx``_ccmii_clk;   /* 200G 3.125GHz */ \
+  always #80         pfx``_cdmii_clk     = ~pfx``_cdmii_clk;   /* 400G 6.25GHz */ \
+  always #(376.48/2.0) pfx``_cdxbi_clk   = ~pfx``_cdxbi_clk;   /* 示例值 */ \
+  always #40         pfx``_dcccmii_clk   = ~pfx``_dcccmii_clk; /* 800G 推导 */ \
+  always #620.608    pfx``_lsbi1_clk     = ~pfx``_lsbi1_clk;   /* 同 lsbi */ \
+  always #500000     pfx``_ptp_clk       = ~pfx``_ptp_clk;     /* 示例值 */ \
+  always #4000       pfx``_rgmii_clk     = ~pfx``_rgmii_clk;   /* 125MHz */ \
+  always #3200       pfx``_rxaui_clk     = ~pfx``_rxaui_clk;   /* 推导 */ \
+  always #80         pfx``_srxaui_clk    = ~pfx``_srxaui_clk;  /* 6.25G 推导 */ \
+  always #7500       pfx``_s100bt1_clk   = ~pfx``_s100bt1_clk; /* 推导 */ \
+  always #666.667    pfx``_sbt1_clk      = ~pfx``_sbt1_clk;    /* 推导 */ \
+  always #4000       pfx``_smii_clk      = ~pfx``_smii_clk;    /* 125MHz */ \
+  always #(pfx``_s100g_half)  pfx``_s100g_clk  = ~pfx``_s100g_clk; \
+  always #(pfx``_s50g_half)   pfx``_s50g_clk   = ~pfx``_s50g_clk; \
+  always #(pfx``_s100g1_half) pfx``_s100g1_clk = ~pfx``_s100g1_clk; \
+  always #(pfx``_s50g1_half)  pfx``_s50g1_clk  = ~pfx``_s50g1_clk;
 
 // 接线半部：放在 vip_if 实例之后
 `define eth_pcs_svt_clock_wire(pfx, vip_if) \
@@ -203,7 +243,40 @@
   assign vip_if.mii_100M_rx_clk        = pfx``_m100_clk; \
   assign vip_if.mii_10M_tx_clk         = pfx``_m10_clk; \
   assign vip_if.mii_10M_rx_clk         = pfx``_m10_clk; \
-  assign vip_if.mdio_clk               = pfx``_mdio_clk;
+  assign vip_if.mdio_clk               = pfx``_mdio_clk; \
+  assign vip_if.caui_64b_clk_tx        = pfx``_caui64b_clk; \
+  assign vip_if.caui_64b_clk_rx        = pfx``_caui64b_clk; \
+  assign vip_if.ccmii_tx_clk           = pfx``_ccmii_clk; \
+  assign vip_if.ccmii_rx_clk           = pfx``_ccmii_clk; \
+  assign vip_if.cdmii_tx_clk           = pfx``_cdmii_clk; \
+  assign vip_if.cdmii_rx_clk           = pfx``_cdmii_clk; \
+  assign vip_if.cdxbi_tx_clk           = pfx``_cdxbi_clk; \
+  assign vip_if.cdxbi_rx_clk           = pfx``_cdxbi_clk; \
+  assign vip_if.dcccmii_tx_clk         = pfx``_dcccmii_clk; \
+  assign vip_if.dcccmii_rx_clk         = pfx``_dcccmii_clk; \
+  assign vip_if.lsbi_single_lane_tx_clk = pfx``_lsbi1_clk; \
+  assign vip_if.lsbi_single_lane_rx_clk = pfx``_lsbi1_clk; \
+  assign vip_if.ptp_system_clk         = pfx``_ptp_clk; \
+  assign vip_if.rgmii_tx_clk           = pfx``_rgmii_clk; \
+  assign vip_if.rgmii_rx_clk           = pfx``_rgmii_clk; \
+  assign vip_if.rxaui_tx_clk           = pfx``_rxaui_clk; \
+  assign vip_if.rxaui_rx_clk           = pfx``_rxaui_clk; \
+  assign vip_if.serial_rxaui_tx_clk    = pfx``_srxaui_clk; \
+  assign vip_if.serial_rxaui_rx_clk    = pfx``_srxaui_clk; \
+  assign vip_if.serial_100baset1_tx_clk = pfx``_s100bt1_clk; \
+  assign vip_if.serial_100baset1_rx_clk = pfx``_s100bt1_clk; \
+  assign vip_if.serial_baset1_tx_clk   = pfx``_sbt1_clk; \
+  assign vip_if.serial_baset1_rx_clk   = pfx``_sbt1_clk; \
+  assign vip_if.smii_tx_clk            = pfx``_smii_clk; \
+  assign vip_if.smii_rx_clk            = pfx``_smii_clk; \
+  assign vip_if.serial_100g_tx_clk     = pfx``_s100g_clk; \
+  assign vip_if.serial_100g_rx_clk     = pfx``_s100g_clk; \
+  assign vip_if.serial_50g_tx_clk      = pfx``_s50g_clk; \
+  assign vip_if.serial_50g_rx_clk      = pfx``_s50g_clk; \
+  assign vip_if.serial_100g_single_lane_tx_clk = pfx``_s100g1_clk; \
+  assign vip_if.serial_100g_single_lane_rx_clk = pfx``_s100g1_clk; \
+  assign vip_if.serial_50g_single_lane_tx_clk  = pfx``_s50g1_clk; \
+  assign vip_if.serial_50g_single_lane_rx_clk  = pfx``_s50g1_clk;
 
 // ---------------- 多 lane（MLD，40G/100G）一键宏 ----------------
 
@@ -263,7 +336,10 @@
 // 展开 = 时钟（+SPEED 频率表）+ 复位/控制 + A/B 两端单 lane 接口对与
 // 4 lane 接口组 + 全部交叉接线（扰动注 A->B：单 lane 线及 lane0）+
 // 全部 vif 下发。top 仅需本宏与 run_test（见 test/uvm/top.sv）。
-// 各速率取用：10g/25g/5g 走 <a>_serial 单 lane；40g 走 <a>_l[0..3]。
+// 各速率取用：10g/25g/5g 走 <a>_serial 单 lane；40g 走 <a>_l[0..3]；
+// 100g（CAUI-10）走 <a>_l[0..9]（20 条 PCS lane 2:1 复用）；
+// 100g4（CAUI-4）走 <a>_l[0..3]（25.78G，5:1 复用）；
+// 200g（Clause 119）走 <a>_l[0..7]（26.5625G，8 条 PCS lane 1:1）。
 // 单/多 lane 接口恒实例化（elaboration 静态），闲置侧无害。
 // +XGMII_DIRECT：直驱模式环回 —— 双向 XGMII 交叉 force（a 的 PHY 驱动
 // rxd 直接成为 b 的 MAC 输入 txd，反之亦然），位钟关闭省事件（提速
@@ -273,17 +349,17 @@
   `eth_pcs_ctrl_reset(ctrl, rst_n, sys_word_clk) \
   `eth_pcs_port(a, sys_word_clk, sys_bit_clk, rst_n) \
   `eth_pcs_port(b, sys_word_clk, sys_bit_clk, rst_n) \
-  `eth_pcs_mld_lanes(a, 4, sys_bit_clk, rst_n) \
-  `eth_pcs_mld_lanes(b, 4, sys_bit_clk, rst_n) \
+  `eth_pcs_mld_lanes(a, 10, sys_bit_clk, rst_n) \
+  `eth_pcs_mld_lanes(b, 10, sys_bit_clk, rst_n) \
   gmii_if a``_gmii (sys_word_clk, rst_n); \
   gmii_if b``_gmii (sys_word_clk, rst_n); \
   assign b``_serial.rx_bit = a``_serial.tx_bit ^ ctrl.err_inject; \
   assign a``_serial.rx_bit = b``_serial.tx_bit; \
-  `eth_pcs_mld_connect(a, b, 4, ctrl.err_inject) \
+  `eth_pcs_mld_connect(a, b, 10, ctrl.err_inject) \
   `eth_pcs_vifs(a) \
   `eth_pcs_vifs(b) \
-  `eth_pcs_mld_vifs(a, 4) \
-  `eth_pcs_mld_vifs(b, 4) \
+  `eth_pcs_mld_vifs(a, 10) \
+  `eth_pcs_mld_vifs(b, 10) \
   initial begin \
     uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top", \
       {"vif_gmii_", `"a`"}, a``_gmii); \

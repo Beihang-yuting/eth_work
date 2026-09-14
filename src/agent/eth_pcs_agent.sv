@@ -37,9 +37,12 @@ class eth_pcs_agent extends uvm_agent;
     if (cfg.num_lanes > 1) begin
       if (cfg.fec_enable)
         `uvm_fatal("CFG", "MLD 多 lane 模式暂不支持叠加 FEC")
-      for (int i = 0; i < cfg.num_lanes; i++)
+      // 物理 lane 数（PMA 复用时少于 PCS lane 数）
+      for (int i = 0; i < ((cfg.num_phys > 0) ? cfg.num_phys : cfg.num_lanes); i++)
         if (cfg.vif_serial_lanes[i] == null)
           `uvm_fatal("CFG", $sformatf("vif_serial_lanes[%0d] 为空", i))
+      if (cfg.num_phys > 0 && cfg.num_lanes % cfg.num_phys != 0)
+        `uvm_fatal("CFG", "num_lanes 须为 num_phys 的整数倍（PMA bit 复用比）")
     end
 
     // 向子组件透传同一 cfg
@@ -50,6 +53,11 @@ class eth_pcs_agent extends uvm_agent;
       `uvm_fatal("CFG", "BASE-X 模式不与 FEC/MLD/AN/LT/直驱叠加")
     if (cfg.basex && cfg.vif_gmii == null)
       `uvm_fatal("CFG", "BASE-X 模式需要 vif_gmii")
+    if (cfg.cl119 && (cfg.num_lanes != 8 || (cfg.num_phys != 0 && cfg.num_phys != 8)))
+      `uvm_fatal("CFG", "200G(cl119) 须 num_lanes = 8（num_phys 为 0 或 8）")
+    if (cfg.cl119 && (cfg.fec_enable || cfg.rs_fec_enable || cfg.an_enable ||
+                      cfg.lt_enable || cfg.basex))
+      `uvm_fatal("CFG", "200G(cl119) 自带 RS(544,514)，不与其它 FEC/AN/LT/BASE-X 叠加")
     if (cfg.fec_enable && cfg.rs_fec_enable)
       `uvm_fatal("CFG", "fec_enable 与 rs_fec_enable 互斥（不同的码，不叠加）")
     if (cfg.rs_fec_enable && cfg.num_lanes > 1)

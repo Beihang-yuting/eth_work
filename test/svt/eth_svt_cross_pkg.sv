@@ -91,6 +91,30 @@ package eth_svt_cross_pkg;
       enable_all_vip_components();
     endfunction
 
+    // 100G CAUI-10 串行（10 x 10.3125G，2:1 PCS lane 交织）
+    function void set_100g_cfg();
+      interface_select = ETH_CAUI;
+      // AM 间隔与我方统一为 64（VIP 默认，约束 {64,128,256}；探针实测
+      // CAUI 码流每 PCS lane 64 块一个 AM）—— 40G 同款坑，显式置位
+      csbi_100g_align_timer = 64;
+      enable_all_vip_components();
+    endfunction
+
+    // 100G CAUI-4 串行（4 x 25.78125G，5:1 PCS lane 交织）
+    function void set_100g4_cfg();
+      interface_select = ETH_CAUI_25X4;
+      csbi_100g_align_timer = 64;
+      enable_all_vip_components();
+    endfunction
+
+    // 200GBASE-R 串行（8 NRZ lane，Clause 119：256B/257B + RS(544,514)）
+    function void set_200g_cfg();
+      interface_select = ETH_200G_SERIAL;
+      // AM 周期 16 码字（VIP 默认；我方 Clause 119 实现按此标定），显式置位
+      ccbi_rs_fec_mode_align_timer = 16;
+      enable_all_vip_components();
+    endfunction
+
     function void set_40g_cfg();
       interface_select = ETH_XLSBI_SERIAL;
       // AM 间隔与我方 BFM 统一为 64（VIP 默认值，合理约束仅 {64,128,256}；
@@ -331,6 +355,9 @@ package eth_svt_cross_pkg;
 
     // 40G（MLD）模式标志：等锁上限放宽（标准 AM 间隔对齐需 ~百 us 级）
     protected bit mld_mode = 0;
+    protected bit is_100g  = 0;
+    protected bit is_caui4 = 0;
+    protected bit is_200g  = 0;
 
     // 1G BASE-X 模式标志：我方 agent 走 GMII + 8b/10b
     protected bit basex_mode = 0;
@@ -363,9 +390,16 @@ package eth_svt_cross_pkg;
           "an73":  vip_cfg.set_an73_cfg();
           "1g":    vip_cfg.set_1g_cfg();
           "2.5g":  vip_cfg.set_2p5g_cfg();
+          "100g":  vip_cfg.set_100g_cfg();
+          "100g4": vip_cfg.set_100g4_cfg();
+          "200g":  vip_cfg.set_200g_cfg();
           default: vip_cfg.set_kr_cfg();
         endcase
-        mld_mode   = (speed == "40g");
+        mld_mode   = (speed == "40g" || speed == "100g" || speed == "100g4" ||
+                      speed == "200g");
+        is_200g    = (speed == "200g");
+        is_100g    = (speed == "100g" || speed == "100g4");
+        is_caui4   = (speed == "100g4");
         basex_mode = (speed == "1g" || speed == "2.5g");
       end
 
@@ -387,14 +421,19 @@ package eth_svt_cross_pkg;
 
       // 40G：4 lane + AM 间隔 64（与 VIP xlsbi_40g_align_timer 一致，
       // 见 set_40g_cfg 注释；必须与 VIP 一致才能互通）
+      // 100G CAUI-10：20 条 PCS lane 以 2:1 bit 复用上 10 条物理 lane
       if (mld_mode) begin
-        phy_cfg.num_lanes  = 4;
+        int nphys;
+        phy_cfg.num_lanes  = is_200g ? 8 : (is_100g ? 20 : 4);
+        phy_cfg.num_phys   = is_200g ? 8 : (is_caui4 ? 4 : (is_100g ? 10 : 0));
+        phy_cfg.cl119      = is_200g;
         phy_cfg.am_spacing = 64;
-        for (int i = 0; i < 4; i++)
+        nphys = is_200g ? 8 : ((is_100g && !is_caui4) ? 10 : 4);
+        for (int i = 0; i < nphys; i++)
           if (!uvm_config_db#(virtual serial_if)::get(this, "",
                 $sformatf("vif_serial_p_l%0d", i),
                 phy_cfg.vif_serial_lanes[i]))
-            `uvm_fatal("CFG", $sformatf("未取得 40g lane%0d 接口", i))
+            `uvm_fatal("CFG", $sformatf("未取得 lane%0d 接口", i))
       end
 
 
@@ -524,6 +563,44 @@ package eth_svt_cross_pkg;
       end
 
       `uvm_info("TEST", "ANPROBE_DONE", UVM_LOW)
+      phase.drop_objection(this);
+    endtask
+
+  endclass
+
+  // ---------------- 多 lane 码流探针（100G 等新模式标定用）----------------
+
+  // 只让 VIP 起流并持续发帧；top_svt 在 +LANE_DUMP_NS 下把 tx_lane 跳变
+  // 写文件，离线解出 AM 图案/周期/位钟等 ground truth。我方 agent 此时
+  // 不对口，VIP checker 报错全部降级。
+  class eth_svt_lane_probe_test extends eth_svt_cross_test;
+
+    `uvm_component_utils(eth_svt_lane_probe_test)
+
+    protected vip_err_window_demoter dem;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      dem = vip_err_window_demoter::type_id::create("dem");
+      dem.active = 1;
+      uvm_report_cb::add(null, dem);
+    endfunction
+
+    virtual task run_phase(uvm_phase phase);
+      vip_frame_seq seq_a = vip_frame_seq::type_id::create("seq_a");
+      int ns = 4000;
+      void'($value$plusargs("LANE_DUMP_NS=%d", ns));
+      phase.raise_objection(this);
+      seq_a.num_frames = 50;
+      fork
+        seq_a.start(env.vip_mac.sequencer);
+      join_none
+      #(ns * 1ns + 1us);
+      `uvm_info("TEST", "LANE_PROBE_DONE", UVM_LOW)
       phase.drop_objection(this);
     endtask
 

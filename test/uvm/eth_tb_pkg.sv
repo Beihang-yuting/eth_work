@@ -238,6 +238,8 @@ package eth_tb_pkg;
 
     // MLD lane 数（+SPEED=40g 时为 4，其余 1）
     protected int mld_lanes = 1;
+    protected int mld_phys  = 1;
+    protected bit is_200g   = 0;
 
     function new(string name, uvm_component parent);
       super.new(name, parent);
@@ -255,7 +257,13 @@ package eth_tb_pkg;
       begin
         string speed = "10g";
         void'($value$plusargs("SPEED=%s", speed));
-        mld_lanes = (speed == "40g") ? 4 : 1;
+        mld_lanes = (speed == "40g")  ? 4  :
+                    (speed == "200g") ? 8  :
+                    (speed == "100g" || speed == "100g4") ? 20 : 1;
+        is_200g   = (speed == "200g");
+        mld_phys  = (speed == "100g")  ? 10 :             // CAUI-10：2:1 复用
+                    (speed == "100g4") ? 4  : mld_lanes;  // CAUI-4 ：5:1 复用
+        // 200g：8 条 PCS lane 各占一条物理 lane（Clause 119，不走 MLD）
       end
 
       if (!uvm_config_db#(virtual xgmii_if)::get(this, "", "vif_xgmii_a", vxa) ||
@@ -328,11 +336,17 @@ package eth_tb_pkg;
       if (mld_lanes > 1) begin
         cfg_a.num_lanes  = mld_lanes;
         cfg_b.num_lanes  = mld_lanes;
-        cfg_a.am_spacing = 512;
-        cfg_b.am_spacing = 512;
+        cfg_a.num_phys   = mld_phys;
+        cfg_b.num_phys   = mld_phys;
+        cfg_a.cl119      = is_200g;
+        cfg_b.cl119      = is_200g;
+        // AM 间隔：40G 环回沿用 512；100G 取 64（与 VIP csbi_100g_align_timer
+        // 默认一致，交叉/环回同一值；须与 top 字钟扣减的 +AM_SPACING 一致）
+        cfg_a.am_spacing = (mld_lanes == 20) ? 64 : 512;
+        cfg_b.am_spacing = (mld_lanes == 20) ? 64 : 512;
         if (fec_mode)
-          `uvm_fatal("CFG", "40g 模式不支持 FEC 测试变体")
-        for (int i = 0; i < mld_lanes; i++) begin
+          `uvm_fatal("CFG", "多 lane 模式不支持 FEC 测试变体")
+        for (int i = 0; i < mld_phys; i++) begin
           if (!uvm_config_db#(virtual serial_if)::get(this, "",
                 $sformatf("vif_serial_a_l%0d", i), cfg_a.vif_serial_lanes[i]) ||
               !uvm_config_db#(virtual serial_if)::get(this, "",

@@ -18,6 +18,11 @@ class eth_pcs_cfg extends uvm_object;
   // FEC 使能：1 = TX/RX 走 Clause 74 编解码；0 = 裸 64b/66b + 块同步
   bit fec_enable = 0;
 
+  // 200GBASE-R 模式（Clause 119）：8 条 PCS lane，256B/257B + RS(544,514)
+  // + 120bit AM。须同时置 num_lanes = num_phys = 8；不走 MLD（Clause 82）
+  // 路径，66b 级不加扰（加扰在 257b 层）。不与其它 FEC/AN/LT 叠加。
+  bit cl119 = 0;
+
   // BASE-X 模式（1000BASE-X / 2.5GBASE-X）：8b/10b + Clause 36 有序集，
   // MAC 侧走 vif_gmii。与 FEC/MLD/AN/LT/直驱均不叠加（agent 校验）。
   bit basex = 0;
@@ -48,6 +53,12 @@ class eth_pcs_cfg extends uvm_object;
 
   // 每 lane AM 间隔（标准 16384；仿真提速可调小，两端一致即可）
   int am_spacing = 16384;
+
+  // 物理串行 lane 数（PMA bit 复用）：0 = 与 num_lanes 相同（40G 4:4）；
+  // 100G CAUI-10 为 10（20 条 PCS lane 以 2:1 按 bit 交织上 10 条物理
+  // lane，物理 lane p 相位 k 承载 PCS lane p*m+k，m = num_lanes/num_phys）。
+  // 接收端不依赖该映射：各解复用流独立块同步，MLD 以 AM 自识别 lane。
+  int num_phys = 0;
 
   // Clause 73 自协商（KR 电口建链）：1 = 上电先走 AN（DME 页交换），
   // 协商完成后自动切入数据模式（PCS 码流）；0 = 直接进数据模式

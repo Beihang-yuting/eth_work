@@ -12,21 +12,31 @@
 //   FEC 须关）。BIP-8 已按表 82-4 实现（TX 生成 + RX 校验计数）。
 // -----------------------------------------------------------------------------
 
-// 支持的最大 lane 数（40G=4；100G 逻辑 20 lane 后续参数化启用）
-localparam int MLD_MAX_LANES = 4;
+// 支持的最大 PCS lane 数（40G=4；100G=20）
+localparam int MLD_MAX_LANES = 20;
 
-// AM 图案（IEEE 802.3 表 82-2，40GBASE-R）：payload 字节序
-// {M0,M1,M2,BIP3,M4,M5,M6,BIP7}，M4..M6 = ~M0..~M2，BIP7 = ~BIP3。
-// bip3 为上一 AM 周期的 BIP-8 累计值（Clause 82.2.9）。
-function automatic logic [63:0] mld_am_payload(int lane, logic [7:0] bip3);
-  logic [7:0] m0, m1, m2;
-  case (lane)
-    0: begin m0 = 8'h90; m1 = 8'h76; m2 = 8'h47; end
-    1: begin m0 = 8'hF0; m1 = 8'hC4; m2 = 8'hE6; end
-    2: begin m0 = 8'hC5; m1 = 8'h65; m2 = 8'h9B; end
-    default: begin m0 = 8'hA2; m1 = 8'h79; m2 = 8'h3D; end
-  endcase
-  return {~bip3, ~m2, ~m1, ~m0, bip3, m2, m1, m0};
+// AM 图案 {M0,M1,M2}（payload 低 24bit，M0 在 [7:0]）。
+//   40G：IEEE 802.3 表 82-2（4 lane）；
+//   100G：表 82-3（20 lane）—— 已用波形探针从 svt VIP ETH_CAUI 码流逐
+//   lane 实测印证（20 组全部一致，AM 间隔 64 块含 AM）。
+// 以 PCS lane 总数选表：nl == 20 用 100G 表，否则用 40G 表。
+localparam logic [23:0] MLD_AM40[4] = '{24'h477690, 24'hE6C4F0,
+                                        24'h9B65C5, 24'h3D79A2};
+localparam logic [23:0] MLD_AM100[20] = '{
+  24'h2168C1, 24'h8E719D, 24'hE84B59, 24'h7B954D, 24'h0907F5,
+  24'hC214DD, 24'h264A9A, 24'h66457B, 24'h7624A0, 24'hFBC968,
+  24'h996CFD, 24'h5591B9, 24'hB2B95C, 24'hBDF81A, 24'hCAC783,
+  24'hCD3635, 24'h4C31C4, 24'hB7D6AD, 24'h2A665F, 24'hE5F0C0 };
+
+function automatic logic [23:0] mld_am_m012(int nl, int lane);
+  return (nl == 20) ? MLD_AM100[lane] : MLD_AM40[lane];
+endfunction
+
+// AM payload 字节序 {M0,M1,M2,BIP3,M4,M5,M6,BIP7}，M4..M6 = ~M0..~M2，
+// BIP7 = ~BIP3。bip3 为上一 AM 周期的 BIP-8 累计值（Clause 82.2.9）。
+function automatic logic [63:0] mld_am_payload(int nl, int lane, logic [7:0] bip3);
+  logic [23:0] m = mld_am_m012(nl, lane);
+  return {~bip3, ~m[23:16], ~m[15:8], ~m[7:0], bip3, m[23:16], m[15:8], m[7:0]};
 endfunction
 
 // BIP-8 累计（IEEE 表 82-4）：66 位块按传输序 bit k 归入
@@ -46,13 +56,10 @@ function automatic logic [7:0] mld_bip_acc(logic [7:0] bip, block66_t b);
 endfunction
 
 // 按 M0..M2（payload 低 24bit）匹配 AM 归属 lane；非 AM 返回 -1
-function automatic int mld_am_lane(block66_t b);
-  logic [63:0] am;
+function automatic int mld_am_lane(int nl, block66_t b);
   if (b.sync != SYNC_CTRL) return -1;
-  for (int l = 0; l < MLD_MAX_LANES; l++) begin
-    am = mld_am_payload(l, 8'h00);
-    if (b.payload[23:0] == am[23:0]) return l;
-  end
+  for (int l = 0; l < nl; l++)
+    if (b.payload[23:0] == mld_am_m012(nl, l)) return l;
   return -1;
 endfunction
 
@@ -90,7 +97,7 @@ class mld_tx_c;
     if (blk_cnt[lane] == 0) begin
       out_am_valid   = 1;
       am_blk.sync    = SYNC_CTRL;
-      am_blk.payload = mld_am_payload(lane, bip[lane]);
+      am_blk.payload = mld_am_payload(num_lanes, lane, bip[lane]);
       bip[lane]      = '0;
       bip[lane]      = mld_bip_acc(bip[lane], am_blk);
       blk_cnt[lane]  = 1;   // AM 占本周期第 1 块
@@ -171,7 +178,7 @@ class mld_rx_c;
   // 不入队，即去偏斜锚）；数据块：入该 lane 队列。
   // 失败路径：AM 图案与既有映射冲突（线缆中途换接）→ 整体重对齐。
   function void push_block(int phys, block66_t b);
-    int l = mld_am_lane(b);
+    int l = mld_am_lane(num_lanes, b);
     push_tick++;
 
     if (l >= 0) begin
