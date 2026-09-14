@@ -12,7 +12,7 @@
 | MAC 侧时钟 | XGMII 156.25 MHz | GMII 125 MHz | GMII 312.5 MHz |
 | MAC 侧接口 | xgmii_if（64bit） | gmii_if（8bit + tx_en/tx_er） | 同 1G |
 | 线路编码 | 64b/66b | 8b/10b | 8b/10b |
-| svt VIP 模式 | ETH_XSBI_SERIAL | ETH_1G_BASEX_1BIT | ETH_2PT5G_BASEX_SERIAL（交叉待做） |
+| svt VIP 模式 | ETH_XSBI_SERIAL | ETH_1G_BASEX_1BIT | ETH_2PT5G_BASEX_SERIAL |
 
 ## 运行
 
@@ -20,7 +20,8 @@
 cd sim
 make loopback_1g stress_1g multi_reset_1g disturb_1g     # 1G 全档
 make loopback_2p5g stress_2p5g multi_reset_2p5g          # 2.5G 全档
-make svt_1g                                              # 1G 与 VIP 交叉
+make svt_1g svt_2p5g                                     # 1G/2.5G 与 VIP 交叉
+make svt_1g_reset svt_2p5g_reset                         # 交叉中途复位恢复
 ```
 
 ## 预期结果判读

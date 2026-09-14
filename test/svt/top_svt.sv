@@ -38,6 +38,7 @@ module top_svt;
   bit use_25g = 0;
   bit use_40g = 0;
   bit use_1g  = 0;
+  bit use_2p5g = 0;
 
   initial begin
     string speed = "10g";
@@ -45,6 +46,7 @@ module top_svt;
     use_25g = (speed == "25g");
     use_40g = (speed == "40g");
     use_1g  = (speed == "1g");
+    use_2p5g = (speed == "2.5g");
   end
 
   // 自研侧字时钟：aip_clk 独立产生 156.25MHz；与 VIP 串行位时钟的微小
@@ -67,6 +69,9 @@ module top_svt;
     else if (use_1g)
       // 1G BASE-X：GMII 字节时钟 = 1.25Gbaud / 10 = 125MHz
       our_word_clk_gen.set_freq(1.25e9 / 10.0);
+    else if (use_2p5g)
+      // 2.5G BASE-X：GMII 字节时钟 = 3.125Gbaud / 10 = 312.5MHz
+      our_word_clk_gen.set_freq(3.125e9 / 10.0);
     else
       our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0);
     // +100ppm：删除主导域（生产恒盈余，弹性删除只删帧间 idle），
@@ -77,7 +82,7 @@ module top_svt;
 
   // 我方串行位时钟随速率选择（与 VIP 同源信号）
   wire our_serial_clk = use_25g ? v_serial_25g_clk :
-                        use_1g  ? v_sx_clk          : v_serial_baser_clk;
+                        (use_1g || use_2p5g) ? v_sx_clk : v_serial_baser_clk;
 
   // 复位：VIP 侧一个 gmii 时钟宽度的高脉冲（同示例 reset 序列时序）；
   // 自研侧低有效复位同窗释放

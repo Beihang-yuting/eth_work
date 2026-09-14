@@ -38,6 +38,9 @@ make loopback_2p5g      # 2.5G 环回冒烟
 make stress_2p5g        # 2.5G 大流量 1000 帧
 make multi_reset_2p5g   # 2.5G 5 轮中途复位恢复
 make svt_1g             # 1G 与 svt VIP 交叉
+make svt_2p5g           # 2.5G 与 svt VIP 交叉
+make svt_1g_reset       # 1G 交叉中途复位恢复（3 轮复位，VIP 持续在线）
+make svt_2p5g_reset     # 2.5G 交叉中途复位恢复
 ```
 
 同一个 simv，`+SPEED=1g` / `+SPEED=2.5g` 切换，无需重编译。
@@ -84,8 +87,13 @@ initial uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top",
   字节来对齐 /S/（svt VIP 即如此，实测约一半帧前导只有 6 字节）。monitor
   按 SFD 定位帧起点，前导 0x55 有 1~7 个都算合法（802.3 对 MAC 的要求）。
   若自己写 GMII 侧 checker，切勿写死"7×0x55 + SFD"。
-- 与 VIP 交叉：`make svt_1g` 实测 A 500/500 bad=0、B 1000/1000，
-  UVM_ERROR=0、UVM_WARNING=0（VIP 全套协议 checker 开启）。
+- 与 VIP 交叉：`make svt_1g` / `make svt_2p5g` 实测均为 A 500/500 bad=0、
+  B 1000/1000，UVM_ERROR=0、UVM_WARNING=0（VIP 全套协议 checker 开启）；
+  交叉复位 `svt_1g_reset` / `svt_2p5g_reset` 3 轮全过。
+- **VIP 2.5G 的位钟就是我们供给的 `serial_basex_clk`**（波形探针实测：
+  默认 1.25GHz 下 VIP 2.5G 码流位周期为 800ps）。所以 +SPEED=2.5g 时
+  时钟宏把 basex 串行钟改为 3.125GHz、GMII 312.5MHz、XGMII 39.0625MHz
+  （VIP 文档值），其余模式时钟不变。
 
 ## 5. 已知限制（TODO）
 
@@ -93,5 +101,4 @@ initial uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top",
   VIP 交叉时 VIP 侧须 `enable_an37_mode = 0`。
 - 同步 FSM 为简化版（未实现 good_cgs 回升计数细节）。
 - 不与 FEC / MLD / AN(cl73) / LT / 直驱叠加（agent build 阶段校验拦截）。
-- 2.5G 与 VIP 的交叉验证待做（VIP `ETH_2PT5G_BASEX_SERIAL` 的串行时钟
-  来源需先用波形探针标定）。
+- SGMII / 100M / 10M（同属 8b/10b 族，速率适配靠字节复制）未做。

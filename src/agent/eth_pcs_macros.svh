@@ -99,7 +99,9 @@
   end
 
 // svt ethernet VIP 全套接口时钟：一键生成全部时钟信号 + 翻转 + 接线。
-// 周期值取自 VIP 25G 示例 top；必须全接 —— 只接子集会导致某些
+// 周期值取自 VIP 25G 示例 top；+SPEED=2.5g 时 GMII/XGMII/basex 串行三路
+// 改为 2.5GBASE-X 频率（VIP 在该模式直接以 serial_basex_clk 为位钟，
+// 已用波形探针实测确认）。必须全接 —— 只接子集会导致某些
 // interface_select 模式内部时钟不转、TX 恒值（25G 曾因此假死）。
 // 须放在 vip_if 实例之后。暴露常用时钟：pfx_serial_baser_clk（10G 位钟）、
 // pfx_serial_25g_clk（25G 位钟）、pfx_gmii_clk（复位节拍）、
@@ -113,9 +115,18 @@
   bit pfx``_66t_clk, pfx``_40t_clk, pfx``_s4x_clk, pfx``_sx_clk; \
   bit pfx``_grmii_clk, pfx``_rmii_clk, pfx``_m100_clk, pfx``_m10_clk; \
   bit pfx``_tbi_clk, pfx``_mdio_clk; \
+  realtime pfx``_gmii_half = 4000, pfx``_xgmii_half = 3200, pfx``_sx_half = 400; \
+  initial begin \
+    string sp_s; \
+    if ($value$plusargs("SPEED=%s", sp_s) && sp_s == "2.5g") begin \
+      pfx``_gmii_half  = 1600;   /* GMII 312.5MHz */ \
+      pfx``_xgmii_half = 12800;  /* XGMII 39.0625MHz（VIP 2.5G 文档值）*/ \
+      pfx``_sx_half    = 160;    /* basex 串行 3.125Gbaud */ \
+    end \
+  end \
   always #50         pfx``_reference_clk = ~pfx``_reference_clk; \
-  always #4000       pfx``_gmii_clk      = ~pfx``_gmii_clk; \
-  always #3200       pfx``_xgmii_clk     = ~pfx``_xgmii_clk; \
+  always #(pfx``_gmii_half)  pfx``_gmii_clk  = ~pfx``_gmii_clk; \
+  always #(pfx``_xgmii_half) pfx``_xgmii_clk = ~pfx``_xgmii_clk; \
   always #(1551.52/2.0) pfx``_xsbi_clk   = ~pfx``_xsbi_clk; \
   always #(96.97/2.0)   pfx``_serial_baser_clk = ~pfx``_serial_baser_clk; \
   always #(38.788/2.0)  pfx``_serial_25g_clk   = ~pfx``_serial_25g_clk; \
@@ -133,7 +144,7 @@
   always #1280       pfx``_66t_clk       = ~pfx``_66t_clk; \
   always #775.757576 pfx``_40t_clk       = ~pfx``_40t_clk; \
   always #160        pfx``_s4x_clk       = ~pfx``_s4x_clk; \
-  always #400        pfx``_sx_clk        = ~pfx``_sx_clk; \
+  always #(pfx``_sx_half) pfx``_sx_clk   = ~pfx``_sx_clk; \
   always #40000      pfx``_grmii_clk     = ~pfx``_grmii_clk; \
   always #10000      pfx``_rmii_clk      = ~pfx``_rmii_clk; \
   always #20000      pfx``_m100_clk      = ~pfx``_m100_clk; \

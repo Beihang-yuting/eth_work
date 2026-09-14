@@ -84,6 +84,13 @@ package eth_svt_cross_pkg;
       enable_all_vip_components();
     endfunction
 
+    // 2.5GBASE-X 串行（8b/10b，tx_lane[0]，3.125Gbaud）；关 Clause 37 AN
+    function void set_2p5g_cfg();
+      interface_select = ETH_2PT5G_BASEX_SERIAL;
+      enable_an37_mode = 1'b0;
+      enable_all_vip_components();
+    endfunction
+
     function void set_40g_cfg();
       interface_select = ETH_XLSBI_SERIAL;
       // AM 间隔与我方 BFM 统一为 64（VIP 默认值，合理约束仅 {64,128,256}；
@@ -355,10 +362,11 @@ package eth_svt_cross_pkg;
           "40g":   vip_cfg.set_40g_cfg();
           "an73":  vip_cfg.set_an73_cfg();
           "1g":    vip_cfg.set_1g_cfg();
+          "2.5g":  vip_cfg.set_2p5g_cfg();
           default: vip_cfg.set_kr_cfg();
         endcase
         mld_mode   = (speed == "40g");
-        basex_mode = (speed == "1g");
+        basex_mode = (speed == "1g" || speed == "2.5g");
       end
 
       vip_cfg.mac_address[0] = 48'h000000004455;
