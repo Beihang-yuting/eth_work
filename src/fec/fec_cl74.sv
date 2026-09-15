@@ -13,14 +13,18 @@
 // -----------------------------------------------------------------------------
 
 // 设计取舍（简单但完整）：
-// 1. PN-2112 用 x^58+x^39+1、全 1 种子、每码字重启 —— 标准允许实现相关的
-//    PN 细节，此处两端约定一致即可，重启式实现无需跨码字状态。
+// 1. PN-2112 用 x^58+x^39+1、每码字重启，种子 58'h2AA_AAAA_AAAA_AAAA
+//    （1010…10 交替）—— 由 svt VIP（ETH_XSBI_SERIAL + enable_fec）实抓码流
+//    标定：码字边界处伴随式跨码字恒定（证明每码字重启），恒定值与该种子的
+//    PN 伴随式一致，去 PN 后 22 个码字伴随式全零。
 // 2. 突发纠错不用传统 error-trapping（移位陷阱对缩短码需要周期修正），
 //    改用"逐位置线性求解"：预计算 x^i mod g 表，对每个候选突发起点解
 //    GF(2) 线性方程组。仅在伴随式非零时触发，仿真代价可接受，
 //    且对缩短码数学上无歧义。
-// 3. 66b→65b 转码：压缩位 T = sync[1]（数据块 01 -> 0，控制块 10 -> 1），
-//    重建 sync = T ? 2'b10 : 2'b01。非法同步头在编码前应已被 PCS 层拦截。
+// 3. 66b→65b 转码：T = sync[0] ^ payload[8]（sync[0] 为第二个上线的同步头
+//    位；与加扰后 payload bit8 异或保证 T 位有跳变），重建 sync[0] =
+//    T ^ payload[8]、sync[1] = ~sync[0]。同样由 VIP 码流标定（全部控制块
+//    的 T ^ payload[8] 恒为 0）。非法同步头在编码前应已被 PCS 层拦截。
 
 // ---------------- 公共参数 ----------------
 
@@ -40,10 +44,12 @@ localparam logic [31:0] FEC_POLY = 32'h00A0_0805;
 
 // ---------------- PN-2112 ----------------
 
-// 对 2112bit 码字原位异或 PN 序列。发生成器 x^58+x^39+1、全 1 种子、
-// 每码字重启；编码/解码调用同一函数保证两端一致。
+// 对 2112bit 码字原位异或 PN 序列。发生成器 x^58+x^39+1、每码字重启、
+// 种子 1010…10（见文件头取舍 1）；编码/解码调用同一函数保证两端一致。
+localparam logic [57:0] FEC_PN_SEED = 58'h2AA_AAAA_AAAA_AAAA;
+
 function automatic void fec_pn_xor(ref logic cw[FEC_N]);
-  logic [57:0] s = '1;
+  logic [57:0] s = FEC_PN_SEED;
   for (int i = 0; i < FEC_N; i++) begin
     logic b = s[38] ^ s[57];
     cw[i] ^= b;
@@ -69,9 +75,9 @@ class fec_cl74_encoder_c;
       logic [31:0] parity;
       int idx = 0;
 
-      // 66b→65b 转码：压缩位在前，随后 payload LSB-first
+      // 66b→65b 转码：T 位在前（sync[0] ^ payload[8]），随后 payload LSB-first
       foreach (blk_q[k]) begin
-        msg[idx++] = blk_q[k].sync[1];
+        msg[idx++] = blk_q[k].sync[0] ^ blk_q[k].payload[8];
         for (int i = 0; i < 64; i++) msg[idx++] = blk_q[k].payload[i];
       end
       blk_q.delete();
@@ -308,9 +314,11 @@ class fec_cl74_decoder_c;
                                         output block66_t blks[FEC_BLOCKS]);
     int idx = 0;
     for (int k = 0; k < FEC_BLOCKS; k++) begin
-      logic t = cw[idx++];
-      blks[k].sync = t ? SYNC_CTRL : SYNC_DATA;
+      logic t;
+      t = cw[idx++];
       for (int i = 0; i < 64; i++) blks[k].payload[i] = cw[idx++];
+      // sync[0] = T ^ payload[8]；data=01（sync[0]=1）、ctrl=10（sync[0]=0）
+      blks[k].sync = (t ^ blks[k].payload[8]) ? SYNC_DATA : SYNC_CTRL;
     end
   endfunction
 

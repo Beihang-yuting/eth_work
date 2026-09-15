@@ -39,6 +39,7 @@ module top_svt;
   bit use_40g = 0;
   bit use_100g = 0;
   bit use_100g4 = 0;
+  bit use_100gr = 0;   // 100GBASE-R + RS-FEC（VIP ETH_CSBI_4_LANE，4 × 25.78G）
   bit use_200g = 0;
   bit use_1g  = 0;
   bit use_2p5g = 0;
@@ -50,6 +51,7 @@ module top_svt;
     use_40g = (speed == "40g");
     use_100g = (speed == "100g");
     use_100g4 = (speed == "100g4");
+    use_100gr = (speed == "100gr");
     use_200g = (speed == "200g");
     use_1g  = (speed == "1g");
     use_2p5g = (speed == "2.5g");
@@ -75,8 +77,9 @@ module top_svt;
     else if (use_100g)
       // 100G CAUI-10：10 条物理 lane 合流字率，扣 AM 间隔 64 开销
       our_word_clk_gen.set_freq(10.0 * 10.3125e9 / 66.0 * 63.0 / 64.0);
-    else if (use_100g4)
-      // 100G CAUI-4：4 × 25.78125G 合流字率，扣 AM 间隔 64 开销
+    else if (use_100g4 || use_100gr)
+      // 100G CAUI-4 / RS-FEC：4 × 25.78125G 合流字率，扣 AM 间隔 64 开销
+      //（RS-FEC 转码省出的带宽正好抵掉校验位）
       our_word_clk_gen.set_freq(4.0 * 25.78125e9 / 66.0 * 63.0 / 64.0);
     else if (use_200g)
       // 200G：3.125G 块/s 扣 AM+填充占用（每 16 码字 320 组中 4 组）
@@ -88,7 +91,9 @@ module top_svt;
       // 2.5G BASE-X：GMII 字节时钟 = 3.125Gbaud / 10 = 312.5MHz
       our_word_clk_gen.set_freq(3.125e9 / 10.0);
     else
-      our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0);
+      // 单 lane；+RSFEC 时每 AM 周期 320 个 257b 组中 1 组让给 AM
+      our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0 *
+                                ($test$plusargs("RSFEC") ? 319.0 / 320.0 : 1.0));
     // +100ppm：删除主导域（生产恒盈余，弹性删除只删帧间 idle），
     // 覆盖 fs 舍入与 VIP 位钟的微小速率差
     our_word_clk_gen.set_ppm(100);
@@ -137,7 +142,7 @@ module top_svt;
 
   // 集成宏：lane 组声明（实例 p_l[i]，vif 键 vif_serial_p_l<i>）
   // 物理 lane 位钟随模式：CAUI-4 为 25.78G，其余多 lane 为 10.3125G
-  wire p_lane_clk = use_100g4 ? v_serial_25g_clk :
+  wire p_lane_clk = (use_100g4 || use_100gr) ? v_serial_25g_clk :
                     use_200g  ? v_scd_clk        : v_serial_baser_clk;
   `eth_pcs_mld_lanes(p, 10, p_lane_clk, our_rst_n)
 
@@ -154,9 +159,9 @@ module top_svt;
                     p_l[6].tx_bit, p_l[5].tx_bit, p_l[4].tx_bit,
                     p_l[3].tx_bit, p_l[2].tx_bit, p_l[1].tx_bit,
                     p_l[0].tx_bit} :
-    (use_40g || use_100g4) ? {'0, p_l[3].tx_bit, p_l[2].tx_bit,
-                                   p_l[1].tx_bit, p_l[0].tx_bit}
-                           : {'0, p_serial.tx_bit};
+    (use_40g || use_100g4 || use_100gr) ? {'0, p_l[3].tx_bit, p_l[2].tx_bit,
+                                                p_l[1].tx_bit, p_l[0].tx_bit}
+                                        : {'0, p_serial.tx_bit};
   assign p_serial.rx_bit = mac_ethernet_if.tx_lane[0];
 
   // 集成宏：多 lane 接收方向接线 + vif 下发
@@ -182,17 +187,23 @@ module top_svt;
                                                   "tb_ctrl", ctrl);
 
   // ---------------- 多 lane 码流探针（+LANE_DUMP_NS=<ns>）----------------
-  // 把 VIP tx_lane 向量的每次跳变（时间 + 值）写入 lane_dump.txt，供离线
-  // 标定新模式（AM 图案/周期/位钟）。只在显式开启时生效。
+  // 把 tx_lane（VIP 发）与 rx_lane（我方发）的每次跳变写入 lane_dump.txt
+  //（每行：时间 tx_lane rx_lane），供离线标定新模式（AM 图案/周期/位钟）
+  // 或核对线上码字（伴随式）。+LANE_DUMP_FROM_NS=<ns> 只 dump 该时刻之后
+  // 的窗口。只在显式开启时生效。
   initial begin
-    int dump_ns, fd;
+    int dump_ns, from_ns, fd;
+    from_ns = 0;
     if ($value$plusargs("LANE_DUMP_NS=%d", dump_ns)) begin
+      void'($value$plusargs("LANE_DUMP_FROM_NS=%d", from_ns));
       fd = $fopen("lane_dump.txt", "w");
       fork
         forever begin
-          @(mac_ethernet_if.tx_lane);
+          @(mac_ethernet_if.tx_lane or mac_ethernet_if.rx_lane);
           if ($realtime > dump_ns * 1ns) break;
-          $fdisplay(fd, "%0t %b", $realtime, mac_ethernet_if.tx_lane[19:0]);
+          if ($realtime >= from_ns * 1ns)
+            $fdisplay(fd, "%0t %b %b", $realtime, mac_ethernet_if.tx_lane[19:0],
+                      mac_ethernet_if.rx_lane[19:0]);
         end
       join
       $fclose(fd);

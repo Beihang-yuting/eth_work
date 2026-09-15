@@ -79,18 +79,6 @@ function automatic void c119_transcode_enc(input block66_t b[4],
   end
 endfunction
 
-// 块类型低半字节 -> 完整 8bit 块类型（Clause 49 合法类型低半字节唯一）
-function automatic byte unsigned c119_bt_from_nibble(logic [3:0] n);
-  case (n)
-    4'hE: return 8'h1E;  4'hD: return 8'h2D;  4'h3: return 8'h33;
-    4'h6: return 8'h66;  4'h5: return 8'h55;  4'h8: return 8'h78;
-    4'hB: return 8'h4B;  4'h7: return 8'h87;  4'h9: return 8'h99;
-    4'hA: return 8'hAA;  4'h4: return 8'hB4;  4'hC: return 8'hCC;
-    4'h2: return 8'hD2;  4'h1: return 8'hE1;  4'hF: return 8'hFF;
-    default: return 8'h00;
-  endcase
-endfunction
-
 function automatic void c119_transcode_dec(input logic [256:0] t,
                                            output block66_t b[4]);
   logic [3:0] is_data;
@@ -109,7 +97,7 @@ function automatic void c119_transcode_dec(input logic [256:0] t,
   for (int i = 0; i < 4; i++) begin
     b[i].sync = is_data[i] ? SYNC_DATA : SYNC_CTRL;
     if (i == first_c) begin
-      b[i].payload = {t[pos+4 +: 56], c119_bt_from_nibble(t[pos +: 4])};
+      b[i].payload = {t[pos+4 +: 56], bt_from_low_nibble(t[pos +: 4])};
       pos += 60;
     end
     else begin

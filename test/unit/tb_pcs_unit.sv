@@ -201,6 +201,56 @@ module tb_pcs_unit;
             dec.uncorrectable_count == uncorr_before + 1);
     end
 
+    // VIP 黄金码字：我方编码器吃进由 VIP 码字反推的 32 块，须逐位复现 VIP
+    // 原码字（含 PN-2112 与 T 位约定）；译码器吃 VIP 码字须原样还原 32 块
+    begin
+      // VIP 10G（ETH_XSBI_SERIAL + enable_fec）探针实抓码字：bit i = 第 i 个
+      // 上线位（含 PN）；8 段拼接，首段为最高位
+      logic [2111:0] gold_cw = {
+        264'hed02116854d6bbbf237546bb79b0c6dd367e94f1bba80773eb3319f88b602cee69,
+        264'hfeef8d0502b351a1b79f3fb5da7e408334f705e9cc7929167bd2180b525aa88adf,
+        264'h5c713fb3f10320b4ead4312c9f8d45735622e191e38d620b961df6bcc13a3485b9,
+        264'hecc81debaf223be8201a7b78b0d7601ec23705f66af693796b2550bf030a70522a,
+        264'h856a37f7f734044dc3448d4aa92663a3ae574c4ed2ba5e1d7880ae6d5e867780e2,
+        264'h4b9c3096b3153ad57c5f45288a0214109354501bca8c04a64083f7717d6fb85a32,
+        264'h7632f0aba951cc817529022ffa3c6d5c67d27c79082285720437502011a0ac76c0,
+        264'h5a97f965e2a23af6eaafbdd6580d9577195f24e0e52eb22c83c5abdbee52c870a8 };
+      // 由该码字反推的 32 个 66b 块 {sync[1:0], payload[63:0]}
+      logic [65:0] gold_blk[32] = '{
+        66'h2e380b888d69bc7ab, 66'h2029b9293e1062b20, 66'h200a2eacb004d5109, 66'h2fc2ac32b7f745091,
+        66'h2efd2ff72ba9c44a8, 66'h2a35b468a2195c81a, 66'h206045fcb87251265, 66'h267a0fefc2e3371df,
+        66'h27447414822c7b385, 66'h2be0c583f012bba8a, 66'h2e8a0aebff828b13f, 66'h26e5c344eadb7fd6d,
+        66'h28dc50be616acf8f6, 66'h29b974ae978df40bd, 66'h28f6aa8e66c4609eb, 66'h2628808e42ee56b44,
+        66'h2e079d792d6bfe7ef, 66'h25d1ab7ae75b136a1, 66'h291fdb070368d13b5, 66'h20141f6893c020c00,
+        66'h2eba37a5a860b4cfb, 66'h2472e9f1cb9a50025, 66'h2f391bedfe7a91a09, 66'h2992ba182b541cbce,
+        66'h20287beca9d05c620, 66'h2dbb31f7a6bab7203, 66'h2b1e69810322110a8, 66'h2fa819d38b1848c0e,
+        66'h2f1ad1889a0088e3d, 66'h2f3f5ea9af20c66bd, 66'h247718cd3933d7cb6, 66'h2fe53f110f48a9c6e };
+      fec_cl74_encoder_c genc = new();
+      fec_cl74_decoder_c gdec = new();
+      block66_t gb;
+      bit       gout;
+      int       same_bits, same_blks;
+
+      same_bits = 0;
+      same_blks = 0;
+      gout      = 0;
+      for (int j = 0; j < FEC_BLOCKS; j++) begin
+        gb.sync    = gold_blk[j][65:64];
+        gb.payload = gold_blk[j][63:0];
+        gout = genc.push_block(gb, cw);
+      end
+      for (int i = 0; i < FEC_N; i++) if (cw[i] == gold_cw[i]) same_bits++;
+      for (int i = 0; i < FEC_N; i++)
+        if (gdec.push_bit(gold_cw[i], blks))
+          for (int k = 0; k < FEC_BLOCKS; k++)
+            if ({blks[k].sync, blks[k].payload} == gold_blk[k]) same_blks++;
+      check("fec: VIP golden codeword produced", gout);
+      check("fec: VIP golden codeword bit-exact", same_bits == FEC_N);
+      check("fec: VIP golden blocks recovered", same_blks == FEC_BLOCKS);
+      $display("[OK] fec VIP 黄金码字 %0d/%0d bit 一致, 反解 %0d/%0d 块",
+               same_bits, FEC_N, same_blks, FEC_BLOCKS);
+    end
+
     $display("[OK] fec encode/correct/uncorrectable");
   endtask
 
@@ -549,11 +599,15 @@ module tb_pcs_unit;
     end
     check("rs91: uncorrectable detected", unc_cnt >= 8);
 
-    // --- 256B/257B 转码：任意数据/控制块组合双向无损 ---
+    // --- 256B/257B 转码（RS-FEC 形态）：加扰块流经转码/反转码无损 ---
     begin
-      block66_t tb[4], rb[4];
+      scrambler_c   s  = new();
+      rs91_xdec_c   xd = new();
+      block66_t     tb[4], rb[4];
+      block66_t     sent_t[$], got_t[$];
       logic [256:0] t257;
       byte unsigned bts[13];
+      int           tmatch;
       bts = '{BT_CTRL, BT_START0, BT_START4, BT_OSET0, BT_OSET2,
               BT_TERM0, BT_TERM1, BT_TERM2, BT_TERM3, BT_TERM4,
               BT_TERM5, BT_TERM6, BT_TERM7};
@@ -568,65 +622,18 @@ module tb_pcs_unit;
             tb[i].payload = {$urandom, $urandom};
             tb[i].payload[7:0] = bts[$urandom_range(0, 12)];
           end
+          tb[i].payload = s.scramble(tb[i].payload);   // 转码吃加扰后的块
+          sent_t.push_back(tb[i]);
         end
         rs91_transcode_enc(tb, t257);
-        rs91_transcode_dec(t257, rb);
-        for (int i = 0; i < 4; i++) begin
-          check("rs91: transcode sync", rb[i].sync == tb[i].sync);
-          check("rs91: transcode payload", rb[i].payload == tb[i].payload);
-        end
+        xd.decode(t257, rb);
+        for (int i = 0; i < 4; i++) got_t.push_back(rb[i]);
       end
-      $display("[OK] rs91 256B/257B 转码 x300 组（数据/控制混合）");
-    end
-
-    // --- 码流封装：80 块 -> 码字 -> 比特流 -> 还原（含注错纠正）---
-    begin
-      rs91_fec_encoder_c fenc91 = new();
-      rs91_fec_decoder_c fdec91 = new();
-      block66_t sent[$], gotb[RS91_BLOCKS];
-      logic cwbits[RS91_CW_BITS];
-      block66_t tb2;
-      // 解码器锁定阶段吞掉 LOCK_CLEAN(=2) 个码字不交付，故比对起点
-      // 从第 3 个码字对应的块开始
-      int deliver = 0, sent_idx = 2 * RS91_BLOCKS;
-      bit produced;
-
-      for (int r = 0; r < 4; r++) begin
-        // 灌 80 块
-        for (int i = 0; i < RS91_BLOCKS; i++) begin
-          if ($urandom_range(0, 3) == 0) begin
-            tb2.sync    = SYNC_CTRL;
-            tb2.payload = {$urandom, $urandom};
-            tb2.payload[7:0] = BT_CTRL;
-          end
-          else begin
-            tb2.sync    = SYNC_DATA;
-            tb2.payload = {$urandom, $urandom};
-          end
-          sent.push_back(tb2);
-          produced = fenc91.push_block(tb2, cwbits);
-          if (produced) begin
-            // 每个码字注入 5 个符号错（在纠错能力 7 内）
-            for (int e = 0; e < 5; e++)
-              cwbits[e*370 + 3] = ~cwbits[e*370 + 3];
-            for (int k = 0; k < RS91_CW_BITS; k++)
-              if (fdec91.push_bit(cwbits[k], gotb)) begin
-                for (int q = 0; q < RS91_BLOCKS; q++) begin
-                  check("rs91: stream sync",
-                        gotb[q].sync == sent[sent_idx + q].sync);
-                  check("rs91: stream payload",
-                        gotb[q].payload == sent[sent_idx + q].payload);
-                end
-                sent_idx += RS91_BLOCKS;
-                deliver++;
-              end
-          end
-        end
-      end
-      check("rs91: stream locked", fdec91.is_locked());
-      check("rs91: stream delivered", deliver >= 1);
-      $display("[OK] rs91 码流封装：交付 %0d 码字（每字注 5 符号错全纠）, slip=%0d",
-               deliver, fdec91.slip_count);
+      // 首组首块可能缺加扰历史（与 BFM 热身块同理），从第 2 组起逐块比对
+      tmatch = 0;
+      for (int i = 4; i < sent_t.size(); i++) if (got_t[i] == sent_t[i]) tmatch++;
+      check("rs91: transcode lossless", tmatch == sent_t.size() - 4);
+      $display("[OK] rs91 256B/257B 转码（加扰域）%0d/%0d 块无损", tmatch, sent_t.size() - 4);
     end
 
     $display("[OK] rs91 RS(528,514) 纠错 %0d 码字/%0d 符号, 不可纠 %0d",
@@ -785,6 +792,165 @@ module tb_pcs_unit;
         end
       end
     end
+  endtask
+
+  // RS-FEC 码流：随机块流 TX -> 1/4 条 FEC lane（物理乱接 + 随机偏斜 +
+  // 注符号错）-> RX，块逐一比对
+  task automatic test_rs_stream(int nfl);
+    rs91_tx_c     tx = new(nfl);
+    rs91_rx_c     rx = new(nfl);
+    scrambler_c   s  = new();
+    block66_t     sent[$], got[$], b, ob;
+    logic         lane_bits[4][$];
+    int           perm[4], skew[4], cur[4];
+    int           per, nblk, remaining, match, k, tmp;
+    byte unsigned bts[8];
+
+    bts  = '{8'h1E, 8'h78, 8'h87, 8'hFF, 8'h4B, 8'h99, 8'hB4, 8'h33};
+    per  = RS91_CW_BITS / nfl;
+    nblk = (nfl == 4 ? 1260 : 1276) * 3;          // 3 个 AM 周期
+    for (int n = 0; n < nblk; n++) begin
+      if ($urandom_range(0, 2) == 0) begin
+        b.sync    = SYNC_CTRL;
+        b.payload = {$urandom, $urandom};
+        b.payload[7:0] = bts[$urandom_range(0, 7)];
+      end
+      else begin
+        b.sync    = SYNC_DATA;
+        b.payload = {$urandom, $urandom};
+      end
+      b.payload = s.scramble(b.payload);
+      sent.push_back(b);
+      if (tx.push_block(b))
+        for (int l = 0; l < nfl; l++)
+          while (tx.out_bits[l].size() > 0)
+            lane_bits[l].push_back(tx.out_bits[l].pop_front());
+    end
+
+    // 注错：每码字每 lane 若干 bit 错（4 lane 各 1、单 lane 5，均 ≤ t=7 符号）
+    for (int l = 0; l < nfl; l++)
+      for (int c = 0; (c + 1) * per <= lane_bits[l].size(); c++)
+        repeat (nfl == 1 ? 5 : 1) begin
+          k = c * per + $urandom_range(0, per - 1);
+          lane_bits[l][k] = ~lane_bits[l][k];
+        end
+
+    // 物理乱接 + 各 lane 前置随机偏斜（随机垃圾比特），逐 bit 交错投递
+    for (int j = 0; j < nfl; j++) perm[j] = j;
+    for (int j = nfl - 1; j > 0; j--) begin
+      k = $urandom_range(0, j);
+      tmp = perm[j]; perm[j] = perm[k]; perm[k] = tmp;
+    end
+    remaining = 0;
+    for (int j = 0; j < nfl; j++) begin
+      skew[j] = $urandom_range(0, 700);
+      cur[j]  = 0;
+      remaining += lane_bits[j].size();
+    end
+    while (remaining > 0) begin
+      for (int p = 0; p < nfl; p++) begin
+        int ll;
+        ll = perm[p];
+        if (skew[p] > 0) begin
+          rx.push_bit(p, $urandom_range(0, 1));
+          skew[p]--;
+        end
+        else if (cur[ll] < lane_bits[ll].size()) begin
+          rx.push_bit(p, lane_bits[ll][cur[ll]]);
+          cur[ll]++;
+          remaining--;
+        end
+      end
+      while (rx.pop_block(ob)) got.push_back(ob);
+    end
+
+    // TX 从 AM 码字起发，RX 从第一个 AM 起交付：与发送序直接对位
+    match = 0;
+    for (int i = 4; i < got.size() && i < sent.size(); i++)
+      if (got[i] == sent[i]) match++;
+    check("rs stream: aligned", rx.is_aligned());
+    check("rs stream: all delivered", got.size() == nblk);
+    check("rs stream: all blocks match", match == got.size() - 4);
+    check("rs stream: no uncorrectable", rx.rs_uncorrectable == 0);
+    check("rs stream: errors corrected", rx.corrected_count() > 0);
+    check("rs stream: single lock", rx.am_locks == 1 && rx.slip_count == 0);
+    $display("[OK] rs-fec %0d lane 码流 %0d 块全对（乱接+偏斜+注错），纠错码字 %0d",
+             nfl, match, rx.corrected_count());
+  endtask
+
+  // RS-FEC VIP 黄金码字：我方转码 + RS 编码须逐位复现 VIP 25G 实抓码字
+  task automatic test_rs25_golden();
+      // VIP 25G（ETH_25G_SERIAL + IEEE RS-FEC）探针实抓非 AM 码字：bit i = 第 i 个
+      // 上线位；20 段拼接，首段为最高位
+      logic [5279:0] gold_rs = {
+        264'hf16a01f22734a31387b2ef7c241e829c2ee6b887bdd131ebc79b591c1f67f91c4d,
+        264'hfdceb860214b1602196e5b2591a133e7e2f503ec905bee6fc48d03b5b28d2d0a82,
+        264'he1bd3090ed5017166daee98a89343bb8f636af95f3753c512a21c03ae5481de18b,
+        264'hcc3fc2d5ff77df1df41309fdbc9f1f77554fd41e690711f5b1cbb0a337fa9a9321,
+        264'hbe4dfa3733632e03f6bff31b0c8cf0bc49e96a5cbd3738b49d4c8486c81e74249d,
+        264'ha53206b49d5fb4c2ba99fa6181908ad54225e46b18efd64d73f0b4b28d23c2f884,
+        264'h323c2faf354bc7a5b7ff57afbc01db36e48c2b9ea5051919a029d6fc5b99cd1b13,
+        264'hd6d83c1d74c56a4d1b43c3caa7ec1d4eebd5f7c345ff3b15121dfa82c09e9d4754,
+        264'hd4e23abbe006b935ed0101ac00e2aea1f4805d903319a61e1580aebcd3be15f2a3,
+        264'hc1f34cd1ecee956cf7f3559af765f3735abf0dea38c59bceb6beac59e4e9cf303c,
+        264'h4911f01849cf068200561903f8c0af79026960b31e3dbdd22fe2693bc0480cd7fb,
+        264'h00b1900631356e6e40ec48daafb6c3e7e36ecac734e835e4dd0e2a6dff40ec5e5e,
+        264'h0150befa2ce3238e0f261e215f9b08f0a8999dc4d56fe607daa78ae1aab0f420b7,
+        264'h66ae0679e8784864accc1aa49906ca0bea47946eb99f15c9735c75c5e3dd8e2766,
+        264'hd9dda3c67e588ba02ae07d97a9b01d3cbb98f29c2274cb607f70a8e3d80ea31e08,
+        264'h69f9fe4a5b850a7d8e707ef0fe9c80b01c09bd168082fc174dedaeb58569b57e5d,
+        264'hc4647c7371b3a586f83fb3d39a9312e46db12d58816fa93e996dd105e1caf39705,
+        264'h07fdf846037a24cfba89e2d1e2d30bb4c3a4280c31c36f0884411784522b4c6479,
+        264'h66e51c73ca00f66c26889823933be96e8a09d9a5f5cce51b4bd70007933bb4b5d5,
+        264'h545d972cc573224e722c0574dd66081acb0204571808e5995d323e6044f56ee202 };
+      // 由该码字反推的 80 个（已加扰）66b 块 {sync[1:0], payload[63:0]}
+      logic [65:0] gold_rsb[80] = '{
+        66'h2991f30227ab771b0, 66'h281022b8c0472ccae, 66'h21602ba6eb3040d65, 66'h22ecb9662b9912739,
+        66'h2c001e4ceed2d7595, 66'h276697d733946d2f5, 66'h22608e4cefa5ba282, 66'h2471cf2803d9b09a2,
+        66'h2f08a45698c8f2c6d, 66'h20186386de1108822, 66'h25a3c5a6176987485, 66'h208c06f4499f7513c,
+        66'h25e1caf3970507f5d, 66'h28816fa93e996dd10, 66'h239a9312e46db12d5, 66'h2371b3a586f83fb3d,
+        66'h22b4dabf2ee23238e, 66'h20417e0ba6f6d75ac, 66'h2f4e40580e04de8b4, 66'h2dc2853ec7383f787,
+        66'h23a8c7821a7e7f9b2, 66'h2d32d81fdc2a38f60, 66'h2c074f2ee63ca7089, 66'h2622e80ab81f65ea6,
+        66'h21c4ecdb3bb478cef, 66'h22b92e6b8eb8bc7bb, 66'h29417d48f28dd733e, 66'h290c959983549320d,
+        66'h220b766ae0679e887, 66'h207daa78ae1aab0f4, 66'h2f0a8999dc4d56fe6, 66'h28e0f261e215f9b08,
+        66'h22f00a85f7d167129, 66'h26e871536ffa0762f, 66'h2f1b765639a741af2, 66'h22076246d57db61f3,
+        66'h2c02c64018c4d5b79, 66'h2f89a4ef0120335fe, 66'h29a582cc78f6f748b, 66'h2158640fe302bde40,
+        66'h2223e030939e0d034, 66'h2d58b3c9d39e60789, 66'h2e1bd4718b379d6d7, 66'h26ab35eecbe6e6b57,
+        66'h234cd1ecee956cfa7, 66'h2ebcd3be15f2a3c1f, 66'h2d903319a61e1580a, 66'h21ac00e2aea1f4805,
+        66'h2d5df0035c9af6800, 66'h21604f4ea3aa6a711, 66'h21a2ff9d8a890efd4, 66'h2553f60ea775eafbe,
+        66'h275d315a9346d0fd0, 66'h26e67346c4f5b60f0, 66'h29414646680a75bf1, 66'h2f0076cdb9230ae7a,
+        66'h26a978f4b6ffeaf25, 66'h24785f10864785f5e, 66'h2dfac9ae7e169651a, 66'h22115aa844bc8d631,
+        66'h25fb4c2ba99fa6128, 66'h274249da53206b49d, 66'h238b49d4c8486c81e, 66'h2f0bc49e96a5cbd37,
+        66'h29701fb5ff98d8614, 66'h24990df26fd1b99b1, 66'h2fad8e5d8519bfd4d, 66'h2bbaaa7ea0f348388,
+        66'h2c77d04c27f6f275c, 66'h262f30ff0b57fddf7, 66'h24a88700eb9520778, 66'h23d8dabe57cdd4f14,
+        66'h2cdb5dd31512687d7, 66'h25c37a6121daa02e2, 66'h291a076b651a5a150, 66'h25ea07d920b7dcdf8,
+        66'h296e5b2591a133e67, 66'h2dceb860214b16021, 66'h2b591c1f67f91c4df, 66'h26b887bdd131ebc79 };
+    rs91_encoder_c enc = new();
+    block66_t      g4[4];
+    logic [256:0]  t;
+    logic          msg[$];
+    rs91_sym_t     data[RS91_K];
+    rs91_sym_t     cw[RS91_N];
+    int            same;
+
+    for (int g = 0; g < 20; g++) begin
+      for (int i = 0; i < 4; i++) begin
+        g4[i].sync    = gold_rsb[4*g + i][65:64];
+        g4[i].payload = gold_rsb[4*g + i][63:0];
+      end
+      rs91_transcode_enc(g4, t);
+      for (int i = 0; i < 257; i++) msg.push_back(t[i]);
+    end
+    for (int i = 0; i < RS91_K; i++)
+      for (int j = 0; j < RS91_M; j++) data[i][j] = msg[i*RS91_M + j];
+    enc.encode(data, cw);
+    same = 0;
+    for (int i = 0; i < RS91_N; i++)
+      for (int j = 0; j < RS91_M; j++)
+        if (cw[i][j] == gold_rs[i*RS91_M + j]) same++;
+    check("rs25: VIP golden codeword bit-exact", same == RS91_CW_BITS);
+    $display("[OK] rs-fec VIP 25G 黄金码字 %0d/%0d bit 一致（转码+RS 编码）",
+             same, RS91_CW_BITS);
   endtask
 
   // RS(544,514)（200G KP4）：VIP 实抓黄金码字的校验符号逐位复现 +
@@ -964,6 +1130,9 @@ module tb_pcs_unit;
     test_an73();
     test_lt72();
     test_rs91();
+    test_rs_stream(1);
+    test_rs_stream(4);
+    test_rs25_golden();
     test_rs544();
     test_cl119();
     test_8b10b();

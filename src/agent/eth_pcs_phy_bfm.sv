@@ -46,14 +46,24 @@ class eth_pcs_phy_bfm;
   // RS-FEC 同理按码字粒度（5280bit/码字），取 2 个码字深
   localparam int IDLE_DEL_THRESH_RS = RS91_CW_BITS * 2;
 
+  // 100G RS-FEC（4 条 FEC lane）：每 lane 每码字 1320bit，阈值取 4 码字
+  localparam int RS4_DEL_THRESH = RS91_CW_BITS;
+
   // 任一 FEC 模式（两者互斥）
   function bit any_fec();
     return cfg.fec_enable || cfg.rs_fec_enable;
   endfunction
 
+  // 100GBASE-R + RS-FEC：20 条 PCS lane（AM/BIP）经 RS-FEC 映射到 4 条
+  // FEC lane，FEC lane 即物理 lane（无 PMA 复用）
+  function bit rs4();
+    return cfg.rs_fec_enable && cfg.num_lanes > 1;
+  endfunction
+
   // 当前模式的删除阈值
   function int del_thresh();
     if (cfg.cl119)         return C119_DEL_THRESH;
+    if (rs4())             return RS4_DEL_THRESH;
     if (cfg.rs_fec_enable) return IDLE_DEL_THRESH_RS;
     return cfg.fec_enable ? IDLE_DEL_THRESH_FEC : IDLE_DEL_THRESH;
   endfunction
@@ -66,9 +76,9 @@ class eth_pcs_phy_bfm;
   protected fec_cl74_encoder_c fenc;
   protected fec_cl74_decoder_c fdec;
 
-  // RS-FEC（cl91）流水线：cfg.rs_fec_enable 时启用
-  protected rs91_fec_encoder_c renc;
-  protected rs91_fec_decoder_c rdec;
+  // RS-FEC 流水线（cl108 单 lane / cl91 4 lane）：cfg.rs_fec_enable 时启用
+  protected rs91_tx_c rstx;
+  protected rs91_rx_c rsrx;
 
   // 多 lane（Clause 82 MLD）流水线：num_lanes>1 时启用。
   // 每物理 lane 独立 bit 队列与块同步；MLD 负责分发/AM/去偏/重组
@@ -86,6 +96,11 @@ class eth_pcs_phy_bfm;
   protected block_sync_c bsync_l[MLD_MAX_LANES];
   protected logic        txbit_lq[MLD_MAX_LANES][$];
 
+  // MLD + Clause 74 FEC 叠加（40GBASE-KR4 / 100GBASE-CR10）：FEC 按 PCS
+  // lane 各自一套（AM 也作为普通 66b 块进本 lane 码字），RX 侧取代块同步
+  protected fec_cl74_encoder_c fenc_l[MLD_MAX_LANES];
+  protected fec_cl74_decoder_c fdec_l[MLD_MAX_LANES];
+
   // 200G（Clause 119）引擎：cfg.cl119 时启用，取代 MLD
   protected c119_tx_c c119tx;
   protected c119_rx_c c119rx;
@@ -94,9 +109,10 @@ class eth_pcs_phy_bfm;
   // 对应 40 个 257b 组 = 160 块），阈值须不低于 2 对，取 3 对
   localparam int C119_DEL_THRESH = C119_LANE_PAIR * 3;
 
-  // 66b 级是否不加扰（RS-FEC cl91 与 200G 均在更高层加扰，见各自注释）
+  // 66b 级是否不加扰：仅 200G（Clause 119 在 257b 层加扰）。RS-FEC
+  //（cl91/cl108）照常 66b 加扰，转码直接吃加扰后的块（VIP 实测）
   function bit no66scr();
-    return cfg.rs_fec_enable || cfg.cl119;
+    return cfg.cl119;
   endfunction
 
   // PMA bit 复用轮转指针（每物理 lane 一个；m=1 时恒 0）
@@ -108,6 +124,7 @@ class eth_pcs_phy_bfm;
     return (cfg.num_phys > 0) ? cfg.num_phys : cfg.num_lanes;
   endfunction
   function int mux_ratio();
+    if (rs4()) return 1;     // FEC lane 直接上物理 lane
     return cfg.num_lanes / nphys();
   endfunction
 
@@ -134,8 +151,8 @@ class eth_pcs_phy_bfm;
     if (cfg.basex) return brx.is_synced();
     if (in_an_phase() || in_lt_phase()) return 0;
     if (cfg.cl119) return c119rx.is_aligned();
+    if (cfg.rs_fec_enable) return rsrx.is_aligned();
     if (cfg.num_lanes > 1) return mrx.is_aligned();
-    if (cfg.rs_fec_enable) return rdec.is_locked();
     return cfg.fec_enable ? fdec.is_locked() : bsync.is_locked();
   endfunction
 
@@ -175,21 +192,31 @@ class eth_pcs_phy_bfm;
 
   // 对外暴露 RX 侧对齐器统计的只读视图（多 lane 取各 lane 累计）
   function int get_slip_count();
+    if (cfg.rs_fec_enable) return rsrx.slip_count;
     if (cfg.num_lanes > 1) begin
       int s = 0;
-      for (int i = 0; i < cfg.num_lanes; i++) s += bsync_l[i].slip_count;
+      for (int i = 0; i < cfg.num_lanes; i++)
+        s += cfg.fec_enable ? fdec_l[i].slip_count : bsync_l[i].slip_count;
       return s;
     end
-    if (cfg.rs_fec_enable) return rdec.slip_count;
     return cfg.fec_enable ? fdec.slip_count : bsync.slip_count;
   endfunction
 
+  // FEC 纠错统计（RS-FEC 取码字计数；cl74 MLD 叠加时取各 lane 累计）
   function int get_fec_corrected();
-    return fdec.corrected_count;
+    int s = 0;
+    if (cfg.rs_fec_enable) return rsrx.corrected_count();
+    if (cfg.num_lanes <= 1) return fdec.corrected_count;
+    for (int i = 0; i < cfg.num_lanes; i++) s += fdec_l[i].corrected_count;
+    return s;
   endfunction
 
   function int get_fec_uncorrectable();
-    return fdec.uncorrectable_count;
+    int s = 0;
+    if (cfg.rs_fec_enable) return rsrx.rs_uncorrectable;
+    if (cfg.num_lanes <= 1) return fdec.uncorrectable_count;
+    for (int i = 0; i < cfg.num_lanes; i++) s += fdec_l[i].uncorrectable_count;
+    return s;
   endfunction
 
   function new(eth_pcs_cfg cfg);
@@ -203,8 +230,8 @@ class eth_pcs_phy_bfm;
     bsync     = new();
     fenc      = new();
     fdec      = new();
-    renc      = new();
-    rdec      = new();
+    rstx      = new(rs4() ? 4 : 1);
+    rsrx      = new(rs4() ? 4 : 1);
     tx_started = 0;
 
     if (cfg.an_enable) begin
@@ -223,6 +250,8 @@ class eth_pcs_phy_bfm;
       mtx = new(cfg.num_lanes, cfg.am_spacing);
       mrx = new(cfg.num_lanes, cfg.am_spacing);
       foreach (bsync_l[i]) bsync_l[i] = new();
+      foreach (fenc_l[i]) fenc_l[i] = new();
+      foreach (fdec_l[i]) fdec_l[i] = new();
     end
     c119tx = new();
     c119rx = new();
@@ -312,8 +341,21 @@ class eth_pcs_phy_bfm;
           // 放完一对，须有整对余量垫底，否则断流插 0 毁掉后续码字（已实测）
           repeat (144 + 160 + 160) if (c119tx.push_block(ib)) c119_drain();
         end
+        else if (cfg.rs_fec_enable) begin
+          // RS-FEC：预灌整码字垫（码字整体突发入队）。周期首码字因 AM 占位
+          // 装的块少（4 lane 60 块 / 单 lane 76 块），其后每码字 80 块：
+          // 4 lane 灌 3 码字（每 lane 3960bit），单 lane 灌 2 码字（10560bit）
+          repeat (rs4() ? (60 + 80 + 80) : (76 + 80)) begin
+            block66_t ib;
+            ib.sync    = SYNC_CTRL;
+            ib.payload = scr.scramble({56'h0, BT_CTRL});
+            if (rstx.push_block(ib)) rs_drain();
+          end
+        end
         else if (cfg.num_lanes > 1) begin
-          repeat (PRIME_BLOCKS * cfg.num_lanes) begin
+          // FEC 叠加时每 lane 预灌 2 个整码字（码字整体突发入队，垫须按
+          // 码字粒度，同单 lane FEC 的删除阈值取法）
+          repeat ((cfg.fec_enable ? 2 * FEC_BLOCKS : PRIME_BLOCKS) * cfg.num_lanes) begin
             block66_t ib;
             int lane;
             bit amv;
@@ -321,8 +363,8 @@ class eth_pcs_phy_bfm;
             ib.sync    = SYNC_CTRL;
             ib.payload = scr.scramble({56'h0, BT_CTRL});
             mtx.push_block(ib, lane, amv, amb);
-            if (amv) push66(txbit_lq[lane], amb);
-            push66(txbit_lq[lane], ib);
+            if (amv) lane_push(lane, amb);
+            lane_push(lane, ib);
           end
         end
         else begin
@@ -363,14 +405,15 @@ class eth_pcs_phy_bfm;
           continue;
         end
 
-        // RS-FEC 模式不做 66b 级加扰：cl91 的次序是"先 256B/257B 转码
-        // 再加扰"，而转码要读未加扰的块类型字段；跳变密度由码字级
-        // PN 加扰（rs91_pn_xor）保证。加扰在前会让转码读到乱码块类型，
-        // 查表失配 -> 整条码流报废（已实测）。
+        // 66b 级加扰：200G 除外（Clause 119 在 257b 层加扰）。RS-FEC 直接
+        // 转码加扰后的块，只保留首个控制块加扰后的类型低 4 位（VIP 实测）
         if (!no66scr()) blk.payload = scr.scramble(blk.payload);
 
         if (cfg.cl119) begin
           if (c119tx.push_block(blk)) c119_drain();
+        end
+        else if (cfg.rs_fec_enable) begin
+          if (rstx.push_block(blk)) rs_drain();
         end
         else if (cfg.num_lanes > 1) begin
           // MLD 分发：AM 先行入该 lane 队列，数据块随后
@@ -378,13 +421,8 @@ class eth_pcs_phy_bfm;
           bit amv;
           block66_t amb;
           mtx.push_block(blk, lane, amv, amb);
-          if (amv) push66(txbit_lq[lane], amb);
-          push66(txbit_lq[lane], blk);
-        end
-        else if (cfg.rs_fec_enable) begin
-          logic rcw[RS91_CW_BITS];
-          if (renc.push_block(blk, rcw))
-            for (int i = 0; i < RS91_CW_BITS; i++) txbit_q.push_back(rcw[i]);
+          if (amv) lane_push(lane, amb);
+          lane_push(lane, blk);
         end
         else if (cfg.fec_enable) begin
           logic cw[FEC_N];
@@ -496,6 +534,17 @@ class eth_pcs_phy_bfm;
     end
   endtask
 
+  // RS-FEC：把本次产出的 FEC lane 比特搬入串行队列（单 lane 走 txbit_q）
+  protected function void rs_drain();
+    if (!rs4()) begin
+      while (rstx.out_bits[0].size() > 0) txbit_q.push_back(rstx.out_bits[0].pop_front());
+      return;
+    end
+    for (int l = 0; l < 4; l++)
+      while (rstx.out_bits[l].size() > 0)
+        txbit_lq[l].push_back(rstx.out_bits[l].pop_front());
+  endfunction
+
   // 200G：把 c119 TX 本次产出的各逻辑 lane 比特搬入串行队列
   protected function void c119_drain();
     for (int l = 0; l < C119_LANES; l++)
@@ -510,6 +559,18 @@ class eth_pcs_phy_bfm;
     q.push_back(b.sync[1]);
     q.push_back(b.sync[0]);
     for (int i = 0; i < 64; i++) q.push_back(b.payload[i]);
+  endfunction
+
+  // MLD 分发出的块（含 AM）入指定 PCS lane：FEC 叠加时先进本 lane 的
+  // cl74 编码器，集满 32 块整码字入队；否则 66b 直接入队
+  protected function void lane_push(int lane, block66_t b);
+    logic cw[FEC_N];
+    if (!cfg.fec_enable) begin
+      push66(txbit_lq[lane], b);
+      return;
+    end
+    if (fenc_l[lane].push_block(b, cw))
+      for (int i = 0; i < FEC_N; i++) txbit_lq[lane].push_back(cw[i]);
   endfunction
 
   // 多 lane 串行发送线程：每 bit 时钟从本 lane 队列出 1 bit。
@@ -553,6 +614,23 @@ class eth_pcs_phy_bfm;
       if (cfg.cl119) begin
         c119rx.push_bit(li, b);
         while (c119rx.pop_block(ob)) deliver_block(ob);
+        continue;
+      end
+      // 100G RS-FEC：物理 lane 即 FEC lane，AM 锁定/识别/去偏斜在 rsrx 内
+      if (rs4()) begin
+        rsrx.push_bit(li, b);
+        if (!rsrx.is_aligned()) rx_warm = 1;
+        while (rsrx.pop_block(ob)) deliver_block(ob);
+        continue;
+      end
+      // cl74 叠加：本 PCS 流的 FEC 码字对齐取代块同步，译出的 32 块交 MLD
+      if (cfg.fec_enable) begin
+        block66_t fb[FEC_BLOCKS];
+        if (fdec_l[pcs].push_bit(b, fb)) begin
+          foreach (fb[k]) mrx.push_block(pcs, fb[k]);
+          if (!mrx.is_aligned()) rx_warm = 1;
+          while (mrx.pop_block(ob)) deliver_block(ob);
+        end
         continue;
       end
       if (bsync_l[pcs].push_bit(b, blk) && bsync_l[pcs].is_locked()) begin
@@ -603,9 +681,10 @@ class eth_pcs_phy_bfm;
         end
 
         if (cfg.rs_fec_enable) begin
-          block66_t rblks[RS91_BLOCKS];
-          if (rdec.push_bit(b, rblks))
-            for (int k = 0; k < RS91_BLOCKS; k++) deliver_block(rblks[k]);
+          block66_t rb;
+          rsrx.push_bit(0, b);
+          if (!rsrx.is_aligned()) rx_warm = 1;
+          while (rsrx.pop_block(rb)) deliver_block(rb);
         end
         else if (cfg.fec_enable) begin
           block66_t blks[FEC_BLOCKS];
@@ -642,7 +721,7 @@ class eth_pcs_phy_bfm;
 
   protected function void deliver_block(block66_t blk);
     xgmii64_t w;
-    // 与 TX 对称：RS-FEC 模式不做 66b 级解扰（见 tx_sample_loop 注释）
+    // 与 TX 对称：仅 200G 不做 66b 级解扰（见 tx_sample_loop 注释）
     if (!no66scr()) blk.payload = descr.descramble(blk.payload);
     if (rx_warm && !no66scr()) begin
       rx_warm = 0;
@@ -710,8 +789,8 @@ class eth_pcs_phy_bfm;
     bsync.reset();
     fenc.reset();
     fdec.reset();
-    renc.reset();
-    rdec.reset();
+    rstx.reset();
+    rsrx.reset();
     txbit_q.delete();
     rxpin_q.delete();
     tx_started = 0;
@@ -730,6 +809,8 @@ class eth_pcs_phy_bfm;
       mtx.reset();
       mrx.reset();
       foreach (bsync_l[i]) bsync_l[i].reset();
+      foreach (fenc_l[i]) fenc_l[i].reset();
+      foreach (fdec_l[i]) fdec_l[i].reset();
       foreach (txbit_lq[i]) txbit_lq[i].delete();
       foreach (tx_rot[i]) tx_rot[i] = 0;
       foreach (rx_rot[i]) rx_rot[i] = 0;

@@ -30,7 +30,8 @@ package eth_svt_cross_pkg;
   // VIP 组件接齐说明（用户 2026-09-10 要求）：
   //   ① 协议 checker：enable_all_protocol_checks（VIP 默认已开，显式置位
   //      防被随机化改写）—— MAC/PCS/AN 全套 err_check 生效
-  //   ② 功能覆盖率：MAC/PCS/AN 三类 cov 收集器（默认关，须显式开）
+  //   ② 功能覆盖率：MAC/PCS/AN/FEC 四类 cov 收集器 + 协议检查项覆盖率
+  //      （默认关，须显式开；PTP/MACsec/AVB/EEE/MDIO/AD 类属未涉及的功能）
   //   ③ 驱动分析端口：enable_driver_analysis_port（VIP 发出的激励流，
   //      与 monitor 观测流互为佐证）
   //   ④ 双向 monitor 端口：TX/RX 各自接记分板（已有）
@@ -51,6 +52,8 @@ package eth_svt_cross_pkg;
       enable_mac_cov               = 1'b1;   // MAC 层覆盖率
       enable_pcs_cov               = 1'b1;   // PCS 层覆盖率
       enable_an_cov                = 1'b1;   // 自协商覆盖率
+      enable_fec_cov               = 1'b1;   // FEC 层覆盖率（含 FEC 协议检查）
+      enable_checks_cov            = 1'b1;   // 协议检查项覆盖率
       enable_driver_analysis_port  = 1'b1;   // 驱动侧激励流分析端口
     endfunction
 
@@ -113,6 +116,27 @@ package eth_svt_cross_pkg;
       // AM 周期 16 码字（VIP 默认；我方 Clause 119 实现按此标定），显式置位
       ccbi_rs_fec_mode_align_timer = 16;
       enable_all_vip_components();
+    endfunction
+
+    // 100GBASE-R + RS-FEC（Clause 91）4 lane 串行：VIP 以 CSBI_4_LANE +
+    // enable_rs_fec + 1bit 宽度呈现（agent cfg 把它归为 4 条串行 lane）
+    function void set_100gr_cfg();
+      interface_select = ETH_CSBI_4_LANE;
+      enable_rs_fec    = 1'b1;
+      rs_fec_width     = ETH_RS_FEC_1B_WIDTH;
+      enable_all_vip_components();
+    endfunction
+
+    // FEC 叠加开关（第 ⑤ 项）：cl74 BASE-R FEC（单 lane 与 40G 每 lane）；
+    // 25G RS-FEC 走 IEEE Clause 108 而非 25G 联盟模式（VIP 默认联盟），
+    // AM 周期取 VIP 默认 16 码字（显式置位）
+    function void set_fec_overlay(bit cl74, bit rs25);
+      if (cl74) enable_fec = 1'b1;
+      if (rs25) begin
+        enable_xxvsbi_lsbi_rs_fec          = 1'b1;
+        enable_xxvsbi_lsbi_consortium_mode = 1'b0;
+        xxvsbi_rs_fec_mode_align_timer     = 16;
+      end
     endfunction
 
     function void set_40g_cfg();
@@ -358,6 +382,7 @@ package eth_svt_cross_pkg;
     protected bit is_100g  = 0;
     protected bit is_caui4 = 0;
     protected bit is_200g  = 0;
+    protected bit is_100gr = 0;   // 100GBASE-R + Clause 91 RS-FEC（4 FEC lane）
 
     // 1G BASE-X 模式标志：我方 agent 走 GMII + 8b/10b
     protected bit basex_mode = 0;
@@ -393,11 +418,14 @@ package eth_svt_cross_pkg;
           "100g":  vip_cfg.set_100g_cfg();
           "100g4": vip_cfg.set_100g4_cfg();
           "200g":  vip_cfg.set_200g_cfg();
+          "100gr": vip_cfg.set_100gr_cfg();
           default: vip_cfg.set_kr_cfg();
         endcase
+        vip_cfg.set_fec_overlay($test$plusargs("FEC"), $test$plusargs("RSFEC"));
         mld_mode   = (speed == "40g" || speed == "100g" || speed == "100g4" ||
-                      speed == "200g");
+                      speed == "100gr" || speed == "200g");
         is_200g    = (speed == "200g");
+        is_100gr   = (speed == "100gr");
         is_100g    = (speed == "100g" || speed == "100g4");
         is_caui4   = (speed == "100g4");
         basex_mode = (speed == "1g" || speed == "2.5g");
@@ -407,7 +435,9 @@ package eth_svt_cross_pkg;
 
       phy_cfg = eth_pcs_cfg::type_id::create("phy_cfg");
       phy_cfg.is_active  = 1;
-      phy_cfg.fec_enable = 0;
+      // FEC 叠加与 VIP 侧同一组 plusarg（见 set_fec_overlay）；100gr 自带 RS-FEC
+      phy_cfg.fec_enable    = $test$plusargs("FEC");
+      phy_cfg.rs_fec_enable = $test$plusargs("RSFEC") || is_100gr;
       phy_cfg.vif_xgmii  = vx;
       phy_cfg.vif_serial = vs;
 
@@ -424,8 +454,9 @@ package eth_svt_cross_pkg;
       // 100G CAUI-10：20 条 PCS lane 以 2:1 bit 复用上 10 条物理 lane
       if (mld_mode) begin
         int nphys;
-        phy_cfg.num_lanes  = is_200g ? 8 : (is_100g ? 20 : 4);
-        phy_cfg.num_phys   = is_200g ? 8 : (is_caui4 ? 4 : (is_100g ? 10 : 0));
+        phy_cfg.num_lanes  = is_200g ? 8 : ((is_100g || is_100gr) ? 20 : 4);
+        phy_cfg.num_phys   = is_200g ? 8 : ((is_caui4 || is_100gr) ? 4 :
+                                            (is_100g ? 10 : 0));
         phy_cfg.cl119      = is_200g;
         phy_cfg.am_spacing = 64;
         nphys = is_200g ? 8 : ((is_100g && !is_caui4) ? 10 : 4);

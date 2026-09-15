@@ -240,6 +240,7 @@ package eth_tb_pkg;
     protected int mld_lanes = 1;
     protected int mld_phys  = 1;
     protected bit is_200g   = 0;
+    protected bit is_100gr  = 0;   // 100GBASE-R + Clause 91 RS-FEC（4 FEC lane）
 
     function new(string name, uvm_component parent);
       super.new(name, parent);
@@ -259,12 +260,17 @@ package eth_tb_pkg;
         void'($value$plusargs("SPEED=%s", speed));
         mld_lanes = (speed == "40g")  ? 4  :
                     (speed == "200g") ? 8  :
-                    (speed == "100g" || speed == "100g4") ? 20 : 1;
+                    (speed == "100g" || speed == "100g4" || speed == "100gr") ? 20 : 1;
         is_200g   = (speed == "200g");
+        is_100gr  = (speed == "100gr");
         mld_phys  = (speed == "100g")  ? 10 :             // CAUI-10：2:1 复用
-                    (speed == "100g4") ? 4  : mld_lanes;  // CAUI-4 ：5:1 复用
+                    (speed == "100g4" || speed == "100gr") ? 4 : mld_lanes;
+        // 100g4：CAUI-4 5:1 复用；100gr：20 PCS lane 经 RS-FEC 映射到 4 FEC lane
         // 200g：8 条 PCS lane 各占一条物理 lane（Clause 119，不走 MLD）
       end
+
+      // +FEC：Clause 74 FEC 叠加（与各 *_fec 测试子类同效，可配任意 +SPEED）
+      if ($test$plusargs("FEC")) fec_mode = 1;
 
       if (!uvm_config_db#(virtual xgmii_if)::get(this, "", "vif_xgmii_a", vxa) ||
           !uvm_config_db#(virtual xgmii_if)::get(this, "", "vif_xgmii_b", vxb))
@@ -304,12 +310,13 @@ package eth_tb_pkg;
         end
       end
 
-      // RS-FEC（cl91）：+RSFEC 开启，与 cl74 的 fec_mode 互斥
-      if ($test$plusargs("RSFEC")) begin
+      // RS-FEC：+RSFEC 开单 lane RS-FEC（25g 即 Clause 108）；100gr 自带
+      // Clause 91 RS-FEC。与 cl74 的 fec_mode 互斥
+      if ($test$plusargs("RSFEC") || is_100gr) begin
         if (fec_mode)
-          `uvm_fatal("CFG", "+RSFEC 与 cl74 FEC 测试变体互斥");
-        if (mld_lanes > 1)
-          `uvm_fatal("CFG", "RS-FEC 与 MLD 叠加未实现");
+          `uvm_fatal("CFG", "RS-FEC 与 cl74 FEC 测试变体互斥");
+        if (mld_lanes > 1 && !is_100gr)
+          `uvm_fatal("CFG", "多 lane RS-FEC 仅 +SPEED=100gr 形态");
         cfg_a.rs_fec_enable = 1;
         cfg_b.rs_fec_enable = 1;
       end
@@ -344,8 +351,8 @@ package eth_tb_pkg;
         // 默认一致，交叉/环回同一值；须与 top 字钟扣减的 +AM_SPACING 一致）
         cfg_a.am_spacing = (mld_lanes == 20) ? 64 : 512;
         cfg_b.am_spacing = (mld_lanes == 20) ? 64 : 512;
-        if (fec_mode)
-          `uvm_fatal("CFG", "多 lane 模式不支持 FEC 测试变体")
+        // cl74 叠加（fec_mode）按 PCS lane 各一套，40g/100g 均可；与 200g /
+        // 100gr 自带 RS-FEC 的冲突由 agent 配置校验拦截
         for (int i = 0; i < mld_phys; i++) begin
           if (!uvm_config_db#(virtual serial_if)::get(this, "",
                 $sformatf("vif_serial_a_l%0d", i), cfg_a.vif_serial_lanes[i]) ||

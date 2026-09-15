@@ -60,6 +60,20 @@ localparam byte unsigned BT_TERM5    = 8'hd2;
 localparam byte unsigned BT_TERM6    = 8'he1;
 localparam byte unsigned BT_TERM7    = 8'hff;
 
+// 块类型低半字节 -> 完整 8bit 块类型（Clause 49 合法类型的低半字节两两
+// 不同）。256B/257B 转码只保留首个控制块类型的低 4 位，接收端据此复原
+//（Clause 119 与 RS-FEC cl91/cl108 共用）；非法半字节返回 0
+function automatic byte unsigned bt_from_low_nibble(logic [3:0] n);
+  case (n)
+    4'hE: return 8'h1E;  4'hD: return 8'h2D;  4'h3: return 8'h33;
+    4'h6: return 8'h66;  4'h5: return 8'h55;  4'h8: return 8'h78;
+    4'hB: return 8'h4B;  4'h7: return 8'h87;  4'h9: return 8'h99;
+    4'hA: return 8'hAA;  4'h4: return 8'hB4;  4'hC: return 8'hCC;
+    4'h2: return 8'hD2;  4'h1: return 8'hE1;  4'hF: return 8'hFF;
+    default: return 8'h00;
+  endcase
+endfunction
+
 // 7bit 控制字符 C 码映射（IEEE 802.3 表 49-1）
 localparam logic [6:0] CC_IDLE  = 7'h00;
 localparam logic [6:0] CC_ERROR = 7'h1e;

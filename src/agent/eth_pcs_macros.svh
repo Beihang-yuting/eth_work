@@ -8,17 +8,20 @@
 // 用法示例见 docs/integration_10g_basekr.md 与 test/uvm/top.sv。
 //
 // 宏 <-> 速率对照（速率由 +SPEED 运行时选择，无需换宏/换 top）：
-//   eth_pcs_lb_env        全速率一键环回环境（10g/25g/5g 单 lane +
-//                         40g 4 lane 超集，推荐入口，见 test/uvm/top.sv）
-//   eth_pcs_clk_gen       全速率（内含 +SPEED 频率表：10g/25g/5g/40g；
-//                         40g 另读 +AM_SPACING，默认 512）
+//   eth_pcs_lb_env        全速率一键环回环境（单 lane + 10 条 lane 组 +
+//                         GMII 口超集，推荐入口，见 test/uvm/top.sv）
+//   eth_pcs_clk_gen       全速率（+SPEED 频率表：10g/25g/5g/40g/100g/100g4/
+//                         100gr/200g/1g/2.5g；+RSFEC 单 lane 扣 AM 开销）
 //   eth_pcs_ctrl_reset    全速率（复位 + 中途复位/扰动钩子）
 //   eth_pcs_port/vifs/connect        10g/25g/5g 单 lane
 //   （1g/2.5g BASE-X：lb_env 另建 <a>_gmii/<b>_gmii，vif 键 vif_gmii_<x>）
-//   eth_pcs_mld_lanes/connect/vifs   40g（100G 后续同族）
-//   eth_pcs_mld_rx_wire   40g 接 svt VIP 专用
+//   eth_pcs_mld_lanes/connect/vifs   多 lane：40g/100g/100g4/100gr/200g
+//   eth_pcs_mld_rx_wire   多 lane 接 svt VIP 专用
 //   eth_pcs_connect_svt   10g/25g/5g 接 svt VIP 专用
-//   eth_pcs_svt_clock_gen/wire       svt VIP 全模式（27 域时钟全套）
+//   eth_pcs_svt_clock_gen/wire       svt VIP 全模式（79 路时钟全套）
+// FEC 叠加开关（与 +SPEED 正交）：+FEC 开 Clause 74（单 lane 与 40g/100g 每
+// PCS lane）；+RSFEC 开单 lane RS-FEC（25g 即 Clause 108）；100gr 自带
+// Clause 91 RS-FEC（20 PCS lane -> 4 FEC lane）。
 // -----------------------------------------------------------------------------
 
 `ifndef ETH_PCS_MACROS_SVH
@@ -42,7 +45,7 @@
     int    am_sp; \
     real   bit_hz, word_hz; \
     void'($value$plusargs("SPEED=%s", speed_s)); \
-    am_sp = (speed_s == "100g" || speed_s == "100g4") ? 64 : 512; \
+    am_sp = (speed_s == "100g" || speed_s == "100g4" || speed_s == "100gr") ? 64 : 512; \
     void'($value$plusargs("AM_SPACING=%d", am_sp)); \
     case (speed_s) \
       "25g":   bit_hz = 25.78125e9; \
@@ -50,6 +53,7 @@
       "1g":    bit_hz = 1.25e9; \
       "2.5g":  bit_hz = 3.125e9; \
       "100g4": bit_hz = 25.78125e9; \
+      "100gr": bit_hz = 25.78125e9; \
       "200g":  bit_hz = 26.5625e9; \
       default: bit_hz = 10.3125e9; \
     endcase \
@@ -57,7 +61,8 @@
       word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
     else if (speed_s == "100g") \
       word_hz = bit_hz * 10.0 / 66.0 * (am_sp - 1.0) / am_sp; \
-    else if (speed_s == "100g4") \
+    else if (speed_s == "100g4" || speed_s == "100gr") \
+      /* 100gr：RS-FEC 转码省出的带宽正好抵掉校验位，AM 开销同 MLD */ \
       word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
     else if (speed_s == "200g") \
       /* 8 lane × 26.5625G，RS(544,514)+257b 后净 200G = 3.125G 块/s；AM */ \
@@ -67,6 +72,9 @@
       word_hz = bit_hz / 10.0; \
     else \
       word_hz = bit_hz / 66.0; \
+    /* 单 lane RS-FEC：每 AM 周期 320 个 257b 组中 1 组让给 AM */ \
+    if ($test$plusargs("RSFEC") && speed_s != "100gr") \
+      word_hz = word_hz * 319.0 / 320.0; \
     name``_word_clk_gen = new(`"name``_word_clk`", name``_word_clk_if); \
     name``_word_clk_gen.set_freq(word_hz); \
     name``_word_clk_gen.set_ppm(100); \
@@ -154,7 +162,6 @@
   always #(96.97/2.0)   pfx``_serial_baser_clk = ~pfx``_serial_baser_clk; \
   always #(38.788/2.0)  pfx``_serial_25g_clk   = ~pfx``_serial_25g_clk; \
   always #1600       pfx``_xxgmii_clk    = ~pfx``_xxgmii_clk; \
-  always #1280       pfx``_xxvgmii_clk   = ~pfx``_xxvgmii_clk; \
   always #(620.608/2.0) pfx``_xxvsbi_clk = ~pfx``_xxvsbi_clk; \
   always #640        pfx``_lgmii_clk     = ~pfx``_lgmii_clk; \
   always #620.608    pfx``_lsbi_clk      = ~pfx``_lsbi_clk; \
@@ -164,8 +171,23 @@
   always #1600       pfx``_xfbi_clk      = ~pfx``_xfbi_clk; \
   always #800        pfx``_xlgmii_clk    = ~pfx``_xlgmii_clk; \
   always #320        pfx``_cgmii_clk     = ~pfx``_cgmii_clk; \
-  always #1280       pfx``_66t_clk       = ~pfx``_66t_clk; \
-  always #775.757576 pfx``_40t_clk       = ~pfx``_40t_clk; \
+  /* 25G 族并行域时钟由 25G 串行钟同步分频（66T/xxvgmii ÷66、40T ÷40、  */ \
+  /* caui_64b ÷64）：VIP 示例的固定周期值与 38.788ps 串行钟互差约 3ppm， */ \
+  /* 100G RS-FEC（CSBI_4_LANE）模式下 VIP 监视器缓冲约 30us 后下溢（自身  */ \
+  /* TX 码字读出 X、两向报 RS 校验和错；线上码字经伴随式核对全对）。     */ \
+  int pfx``_c66 = 0, pfx``_c40 = 0, pfx``_c64 = 0; \
+  always @(posedge pfx``_serial_25g_clk) begin \
+    pfx``_c66++; \
+    pfx``_c40++; \
+    pfx``_c64++; \
+    if (pfx``_c66 == 33) begin \
+      pfx``_c66 = 0; \
+      pfx``_66t_clk     = ~pfx``_66t_clk; \
+      pfx``_xxvgmii_clk = ~pfx``_xxvgmii_clk; \
+    end \
+    if (pfx``_c40 == 20) begin pfx``_c40 = 0; pfx``_40t_clk = ~pfx``_40t_clk; end \
+    if (pfx``_c64 == 32) begin pfx``_c64 = 0; pfx``_caui64b_clk = ~pfx``_caui64b_clk; end \
+  end \
   always #160        pfx``_s4x_clk       = ~pfx``_s4x_clk; \
   always #(pfx``_sx_half) pfx``_sx_clk   = ~pfx``_sx_clk; \
   always #40000      pfx``_grmii_clk     = ~pfx``_grmii_clk; \
@@ -174,7 +196,6 @@
   always #200000     pfx``_m10_clk       = ~pfx``_m10_clk; \
   always #4000       pfx``_tbi_clk       = ~pfx``_tbi_clk; \
   always #200        pfx``_mdio_clk      = ~pfx``_mdio_clk; \
-  always #(2482.424/2.0) pfx``_caui64b_clk = ~pfx``_caui64b_clk; /* 示例值 */ \
   always #160        pfx``_ccmii_clk     = ~pfx``_ccmii_clk;   /* 200G 3.125GHz */ \
   always #80         pfx``_cdmii_clk     = ~pfx``_cdmii_clk;   /* 400G 6.25GHz */ \
   always #(376.48/2.0) pfx``_cdxbi_clk   = ~pfx``_cdxbi_clk;   /* 示例值 */ \

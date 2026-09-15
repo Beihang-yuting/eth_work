@@ -117,8 +117,8 @@ multi_reset_2p5g: loopback_simv
 	  +SPEED=2.5g -l $(BUILD)/loopback/multi_reset_2p5g.log
 	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_2p5g.log
 
-# RS-FEC（Clause 91，RS(528,514)）自环系。VIP 的 RS-FEC 只绑定 100G
-# CSBI 接口，交叉验证随 100G 多 lane 一并做
+# 单 lane RS-FEC（RS(528,514)，码流格式同 Clause 108）自环系，默认 10G
+# 线速；25G 即 25GBASE-R + Clause 108（见下方 *_25g_rsfec 与 svt_25g_rsfec）
 loopback_rsfec: loopback_simv
 	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
 	  +RSFEC -l $(BUILD)/loopback/run_rsfec.log
@@ -210,12 +210,8 @@ multi_reset_5g: loopback_simv
 	  +SPEED=5g -l $(BUILD)/loopback/multi_reset_5g.log
 	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_5g.log
 
-svt_25g:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt_25g: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=25g -l $(BUILD)/svt/run_25g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_25g.log
 
@@ -278,156 +274,216 @@ multi_reset_200g: loopback_simv
 	  +SPEED=200g -l $(BUILD)/loopback/multi_reset_200g.log
 	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_200g.log
 
-svt_40g:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt_40g: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=40g -l $(BUILD)/svt/run_40g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_40g.log
 
 # 100G CAUI-10 与 VIP（ETH_CAUI）交叉
-svt_100g:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt_100g: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=100g -l $(BUILD)/svt/run_100g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_100g.log
 
 # 100G CAUI-4 与 VIP（ETH_CAUI_25X4）交叉
-svt_100g4:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt_100g4: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=100g4 -l $(BUILD)/svt/run_100g4.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_100g4.log
 
 # 200GBASE-R 与 VIP（ETH_200G_SERIAL）交叉
-svt_200g:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt_200g: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=200g -l $(BUILD)/svt/run_200g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_200g.log
 
 # 1G BASE-X 与 VIP（ETH_1G_BASEX_1BIT）交叉
-svt_1g:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt_1g: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=1g -l $(BUILD)/svt/run_1g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_1g.log
 
 # 2.5G BASE-X 与 VIP（ETH_2PT5G_BASEX_SERIAL）交叉
-svt_2p5g:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt_2p5g: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=2.5g -l $(BUILD)/svt/run_2p5g.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run_2p5g.log
 
 # svt 交叉中途复位恢复：3 轮复位 × 每段 A100+B200，末段按段计数判定
-svt_25g_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_25g_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=25g -l $(BUILD)/svt/run_25g_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_25g_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_25g_reset.log
 
-svt_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  -l $(BUILD)/svt/run_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_reset.log
 
-svt_1g_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_1g_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=1g -l $(BUILD)/svt/run_1g_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_1g_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_1g_reset.log
 
-svt_2p5g_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_2p5g_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=2.5g -l $(BUILD)/svt/run_2p5g_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_2p5g_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_2p5g_reset.log
 
-svt_100g_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_100g_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=100g -l $(BUILD)/svt/run_100g_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_100g_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_100g_reset.log
 
-svt_100g4_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_100g4_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=100g4 -l $(BUILD)/svt/run_100g4_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_100g4_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_100g4_reset.log
 
-svt_200g_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_200g_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=200g -l $(BUILD)/svt/run_200g_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_200g_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_200g_reset.log
 
-svt_40g_reset:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+svt_40g_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
 	  +SPEED=40g -l $(BUILD)/svt/run_40g_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_40g_reset.log
 	grep -q "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200" $(BUILD)/svt/run_40g_reset.log
+
+# ---------------- MLD + FEC 叠加（第 ⑤ 项）----------------
+# +FEC = Clause 74（单 lane / 每 PCS lane）；+RSFEC = 单 lane RS-FEC
+#（25G 即 Clause 108）；+SPEED=100gr = 100GBASE-R + Clause 91 RS-FEC
+#（20 PCS lane -> 4 FEC lane × 25.78G）。码流格式均由 VIP 实抓标定。
+loopback_40g_fec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g +FEC -l $(BUILD)/loopback/run_40g_fec.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_40g_fec.log
+
+stress_40g_fec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g +FEC -l $(BUILD)/loopback/stress_40g_fec.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_40g_fec.log
+
+multi_reset_40g_fec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g +FEC -l $(BUILD)/loopback/multi_reset_40g_fec.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_40g_fec.log
+
+stress_100g_fec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=100g +FEC -l $(BUILD)/loopback/stress_100g_fec.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_100g_fec.log
+
+stress_25g_fec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g +FEC -l $(BUILD)/loopback/stress_25g_fec.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_25g_fec.log
+
+loopback_25g_rsfec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g +RSFEC -l $(BUILD)/loopback/run_25g_rsfec.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_25g_rsfec.log
+
+stress_25g_rsfec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g +RSFEC -l $(BUILD)/loopback/stress_25g_rsfec.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_25g_rsfec.log
+
+multi_reset_25g_rsfec: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g +RSFEC -l $(BUILD)/loopback/multi_reset_25g_rsfec.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_25g_rsfec.log
+
+loopback_100gr: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_loopback_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=100gr -l $(BUILD)/loopback/run_100gr.log
+	grep -q "match=20 mismatch=0" $(BUILD)/loopback/run_100gr.log
+
+stress_100gr: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_stress_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=100gr -l $(BUILD)/loopback/stress_100gr.log
+	grep -q "match=1000 mismatch=0" $(BUILD)/loopback/stress_100gr.log
+
+multi_reset_100gr: loopback_simv
+	$(LOOPBACK_SIMV) +UVM_TESTNAME=eth_multi_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=100gr -l $(BUILD)/loopback/multi_reset_100gr.log
+	grep -q "多次复位覆盖完成: 5 轮" $(BUILD)/loopback/multi_reset_100gr.log
+
+# 与 VIP 交叉：同一 simv（svt_simv 编译一次，同一次 make 内多目标共用）
+SVT_SIMV = $(BUILD)/svt/simv
+SVT_OK   = "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000"
+SVT_ROK  = "A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200"
+
+.PHONY: svt_simv
+svt_simv:
+	mkdir -p $(BUILD)/svt
+	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
+	  -f filelist_svt.f -top top_svt \
+	  -o $(SVT_SIMV) -l $(BUILD)/svt/compile.log
+
+svt_fec: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +FEC -l $(BUILD)/svt/run_fec.log
+	grep -q $(SVT_OK) $(BUILD)/svt/run_fec.log
+
+svt_25g_fec: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g +FEC -l $(BUILD)/svt/run_25g_fec.log
+	grep -q $(SVT_OK) $(BUILD)/svt/run_25g_fec.log
+
+svt_40g_fec: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g +FEC -l $(BUILD)/svt/run_40g_fec.log
+	grep -q $(SVT_OK) $(BUILD)/svt/run_40g_fec.log
+
+svt_25g_rsfec: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g +RSFEC -l $(BUILD)/svt/run_25g_rsfec.log
+	grep -q $(SVT_OK) $(BUILD)/svt/run_25g_rsfec.log
+
+svt_100gr: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=100gr -l $(BUILD)/svt/run_100gr.log
+	grep -q $(SVT_OK) $(BUILD)/svt/run_100gr.log
+
+svt_fec_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +FEC -l $(BUILD)/svt/run_fec_reset.log
+	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_fec_reset.log
+	grep -q $(SVT_ROK) $(BUILD)/svt/run_fec_reset.log
+
+svt_40g_fec_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=40g +FEC -l $(BUILD)/svt/run_40g_fec_reset.log
+	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_40g_fec_reset.log
+	grep -q $(SVT_ROK) $(BUILD)/svt/run_40g_fec_reset.log
+
+svt_25g_rsfec_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=25g +RSFEC -l $(BUILD)/svt/run_25g_rsfec_reset.log
+	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_25g_rsfec_reset.log
+	grep -q $(SVT_ROK) $(BUILD)/svt/run_25g_rsfec_reset.log
+
+svt_100gr_reset: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
+	  +SPEED=100gr -l $(BUILD)/svt/run_100gr_reset.log
+	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_100gr_reset.log
+	grep -q $(SVT_ROK) $(BUILD)/svt/run_100gr_reset.log
 
 # 阶段 2：与 svt ethernet VIP 交叉验证（需 DESIGNWARE_HOME 与
 # dw_vip_setup 生成的 ETH_SVT_DESIGN，见 filelist_svt.f 头注）
 ETH_SVT_DESIGN ?= /home/ubuntu/ryan/eth_svt_design
 
-svt:
-	mkdir -p $(BUILD)/svt
-	ETH_SVT_DESIGN=$(ETH_SVT_DESIGN) $(VCS) \
-	  -f filelist_svt.f -top top_svt \
-	  -o $(BUILD)/svt/simv -l $(BUILD)/svt/compile.log
-	$(BUILD)/svt/simv +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
+svt: svt_simv
+	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
 	  -l $(BUILD)/svt/run.log
 	grep -q "A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000" $(BUILD)/svt/run.log
 

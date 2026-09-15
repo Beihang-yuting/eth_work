@@ -35,8 +35,7 @@ class eth_pcs_agent extends uvm_agent;
     if (cfg.num_lanes <= 1 && cfg.vif_serial == null)
       `uvm_fatal("CFG", "单 lane 模式 vif_serial 为空")
     if (cfg.num_lanes > 1) begin
-      if (cfg.fec_enable)
-        `uvm_fatal("CFG", "MLD 多 lane 模式暂不支持叠加 FEC")
+      // MLD + cl74（fec_enable）按 PCS lane 各自一套 FEC，已支持
       // 物理 lane 数（PMA 复用时少于 PCS lane 数）
       for (int i = 0; i < ((cfg.num_phys > 0) ? cfg.num_phys : cfg.num_lanes); i++)
         if (cfg.vif_serial_lanes[i] == null)
@@ -60,8 +59,9 @@ class eth_pcs_agent extends uvm_agent;
       `uvm_fatal("CFG", "200G(cl119) 自带 RS(544,514)，不与其它 FEC/AN/LT/BASE-X 叠加")
     if (cfg.fec_enable && cfg.rs_fec_enable)
       `uvm_fatal("CFG", "fec_enable 与 rs_fec_enable 互斥（不同的码，不叠加）")
-    if (cfg.rs_fec_enable && cfg.num_lanes > 1)
-      `uvm_fatal("CFG", "RS-FEC 与 MLD 叠加未实现（随 100G 多 lane 一并做）")
+    if (cfg.rs_fec_enable && cfg.num_lanes > 1 &&
+        (cfg.num_lanes != 20 || cfg.num_phys != 4))
+      `uvm_fatal("CFG", "多 lane RS-FEC 仅支持 100GBASE-R 形态：num_lanes=20、num_phys=4")
 
     bfm = new(cfg);
     bfm.arm_rx_dump();

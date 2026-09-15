@@ -74,13 +74,11 @@ make svt_100g_reset svt_100g4_reset svt_200g_reset  # 交叉中途复位恢复
 - **VIP 实现了链路故障信令**：我方未发有效 200G 码流时，VIP 持续发
   Remote Fault 有序集（0x4B，D3=0x02）——将来做 MAC 层 fault 语义验证
   可直接利用。
-- 我方 cl91（100G RS-FEC）现行实现与 VIP 有两处差异，与 VIP 交叉前须改：
-  符号位序应为 LSB 先发；257b 转码应只压缩第一个控制块（本文件第 4 节
-  的规则）。
+- 100G RS-FEC（Clause 91）已按 VIP 实抓码流重做，见
+  `docs/integration_fec.md`（`+SPEED=100gr`）。注意它的加扰位置与 200G 不同：
+  RS-FEC 转码的是 66b 层已加扰的块，200G 是先转码再在 257b 层加扰。
 
 ## 6. 已知限制（TODO）
 
-- 100G + RS-FEC（cl91）叠加（VIP 的 100G RS-FEC 只在 CSBI 并行口上，需
-  PMA gearbox 适配），列入第 ⑤ 项 MLD+FEC 叠加。
 - 200G 的 `_2_LANE` / `_4_LANE`（并行块口）、PAM4 未做。
 - 200G AM 周期取 VIP 默认 16 码字；标准值（81920 块）未参数化。
