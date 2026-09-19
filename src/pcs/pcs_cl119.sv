@@ -474,22 +474,22 @@ localparam logic [119:0] C400_AM[C400_LANES] = '{
 // C400_AM above is kept in physical TX order while this table preserves the
 // protocol lane IDs returned by AM matching.
 localparam logic [119:0] C400_AM_LOGICAL[C400_LANES] = '{
-  120'h864559A979BAA656D9B565B4264A9A,
-  120'h5904354EA6FBCAB1D9B565D0264A9A,
-  120'h3C68CE33C39731CCD9B56514264A9A,
-  120'h6A095DA495F6A25BD9B56518264A9A,
-  120'hC799DD8E38662271D9B5656C264A9A,
-  120'h27146AFBD8EB9504D9B565FA264A9A,
-  120'hC33B8E5D3CC471A2D9B5656B264A9A,
-  120'h8A8C1E607573E19FD9B56560264A9A,
-  120'hA48929CD5B76D632D9B56522264A9A,
-  120'h5E63BD11A19C42EED9B5653D264A9A,
-  120'h2EB0EDB1D14F124ED9B565F2264A9A,
-  120'h0DAED5E6F2512A19D9B565E1264A9A,
-  120'h2F7F797BD0808684D9B5655A264A9A,
-  120'hA90CC10156F33EFED9B56546264A9A,
+  120'h0C8EFE26F37101D9D9B565B6264A9A,
   120'h8121A5987EDE5A67D9B56504264A9A,
-  120'h0C8EFE26F37101D9D9B565B6264A9A
+  120'hA90CC10156F33EFED9B56546264A9A,
+  120'h2F7F797BD0808684D9B5655A264A9A,
+  120'h0DAED5E6F2512A19D9B565E1264A9A,
+  120'h2EB0EDB1D14F124ED9B565F2264A9A,
+  120'h5E63BD11A19C42EED9B5653D264A9A,
+  120'hA48929CD5B76D632D9B56522264A9A,
+  120'h8A8C1E607573E19FD9B56560264A9A,
+  120'hC33B8E5D3CC471A2D9B5656B264A9A,
+  120'h27146AFBD8EB9504D9B565FA264A9A,
+  120'hC799DD8E38662271D9B5656C264A9A,
+  120'h6A095DA495F6A25BD9B56518264A9A,
+  120'h3C68CE33C39731CCD9B56514264A9A,
+  120'h5904354EA6FBCAB1D9B565D0264A9A,
+  120'h864559A979BAA656D9B565B4264A9A
 };
 
 // ---------------- 400G TX ----------------
@@ -518,7 +518,8 @@ class c400_tx_c;
     grp.delete();
     msg.delete();
     pair_idx = 0;
-    prbs9    = 9'h1FF;
+    // ETH_400G_SERIAL align_marker_block uses the PRBS9 seed 1.
+    prbs9    = 9'h001;
     scr.reset();
     foreach (out_bits[l]) out_bits[l].delete();
     start_pair();
@@ -532,17 +533,19 @@ class c400_tx_c;
     int k, c, l, g;
     msg.delete();
     if (pair_idx != 0) return;
+    // The VIP's CDBI scheduler presents each RS codeword over eight lanes
+    // for 68 symbol rows.  Codewords 0/1 occupy rows 0..67, and 2/3 rows
+    // 68..135; within a row the lane parity selects the codeword:
+    //   c = 2*(k/68) + ((k+l)&1), idx = 8*(k%68) + (l>>1).
+    // The first AM period therefore fills the first 96 symbols of c0 and c1
+    // (the two codewords interleaved in msg); c2/c3 start with payload data.
     for (k = 0; k < 12; k++)
-      for (g = 0; g < 4; g++)
-      for (c = 0; c < 4; c++) begin
-          // Current flattened CDBI mapping: four codewords are distributed
-          // across four lane groups; retain the lane rotation for each AM
-          // symbol.  The mapping is under SVT review and does not yet pass
-          // the 400G cross-check.
-          l    = 4*g + ((c + k) % 4);
-          sym = C400_AM[l][10*k +: 10];
-          for (int j = 0; j < 10; j++) msg.push_back(sym[j]);
-        end
+      for (int h = 0; h < 8; h++)
+      for (c = 0; c < 2; c++) begin
+        l    = 2*h + ((c & 1) ^ (k & 1));
+        sym = C400_AM[l][10*k +: 10];
+        for (int j = 0; j < 10; j++) msg.push_back(sym[j]);
+      end
     p = prbs9;
     for (int j = 0; j < 136; j++) begin
       fb = p[8] ^ p[4];
@@ -575,15 +578,17 @@ class c400_tx_c;
     for (int i = 0; i < 514; i++)
       for (c = 0; c < 4; c++) begin
         for (int j = 0; j < 10; j++)
-          d[c][i][j] = msg[(4*i+c)*10 + j];
+          // msg carries the two codewords of each VIP PCS instance as an
+          // interleaved pair: c0/c1 first, then c2/c3.
+          d[c][i][j] = msg[((2*i + (c & 1)) + (c >= 2 ? 1028 : 0))*10 + j];
         enc.encode(d[c], cw[c]);
       end
     for (int l = 0; l < C400_LANES; l++)
       for (int k = 0; k < 136; k++) begin
-        idx = 4*k + (l >> 2);
-        // Keep the addition positive: SV remainder is negative for a
-        // negative dividend, which would index the codeword array with X.
-        c   = ((l & 3) - (k & 3) + 4) % 4;
+        // VIP CDBI mapping: eight lanes contribute one symbol row to each
+        // codeword, and the codeword half changes after 68 rows.
+        idx = 8*(k % 68) + (l >> 1);
+        c   = 2*(k / 68) + ((k + l) & 1);
         sym = cw[c][idx];
         for (int j = 0; j < 10; j++) out_bits[l].push_back(sym[j]);
       end
@@ -754,10 +759,8 @@ class c400_rx_c;
       lid = lane_id[pl];
       for (int k = 0; k < 136; k++) begin
         for (int j = 0; j < 10; j++) sym[j] = q[pl].pop_front();
-        idx = 4*k + (lid >> 2);
-        // Keep the modulo operand positive: a negative SystemVerilog
-        // remainder would index the codeword array with X.
-        c   = ((lid & 3) - (k & 3) + 4) % 4;
+        idx = 8*(k % 68) + (lid >> 1);
+        c   = 2*(k / 68) + ((k + lid) & 1);
         cw[c][idx] = sym;
       end
     end
@@ -767,7 +770,8 @@ class c400_rx_c;
     for (c = 0; c < 4; c++) ok[c] = dec.decode(cw[c]);
     for (int i = 0; i < 514; i++)
       for (c = 0; c < 4; c++)
-        for (int j = 0; j < 10; j++) msg[(4*i+c)*10+j] = cw[c][i][j];
+        for (int j = 0; j < 10; j++)
+          msg[((2*i + (c & 1)) + (c >= 2 ? 1028 : 0))*10+j] = cw[c][i][j];
     start = (pair_idx == 0) ? C400_HDR_BITS : 0;
     for (int b = start; b + 257 <= C400_PAIR_BITS; b += 257) begin
       for (int i = 0; i < 257; i++) t[i] = msg[b+i];
