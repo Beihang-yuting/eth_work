@@ -8,9 +8,11 @@
 //         因 BFM 是纯类对象、与 monitor 同属一个 agent 内部装配）。
 // -----------------------------------------------------------------------------
 
-// 为什么从 mailbox 而非 XGMII RX 引脚采样：mailbox 与引脚承载同一拍流，
-// 但 mailbox 无时序竞争、且在对接真实 MAC 时（RX 引脚被 MAC 消费）监视
-// 路径保持不变；引脚版监视器留待接 RTL 时按需增加。
+// 为什么从 mailbox 而非 XGMII RX 引脚采样：mailbox 无时序竞争，且在对接
+// 真实 MAC 时（RX 引脚被 MAC 消费）监视路径保持不变。两者内容不完全相同：
+// mailbox 只含链路可用期间还原的拍；引脚另有链路未起时的 Local Fault 与
+// 帧间弹性插/删 idle（monitor 看不到，故 BFM 单独统计引脚帧内见底）。
+// 引脚版监视器留待接 RTL 时按需增加。
 class eth_pcs_monitor extends uvm_monitor;
 
   `uvm_component_utils(eth_pcs_monitor)
@@ -80,11 +82,14 @@ class eth_pcs_monitor extends uvm_monitor;
   //（如注错测试预期非零），monitor 只负责如实曝光。
   virtual function void report_phase(uvm_phase phase);
     `uvm_info("PCS_STATS", $sformatf(
-      "frames=%0d crc_err=%0d preamble_err=%0d invalid_block=%0d slip=%0d fec_corr=%0d fec_uncorr=%0d tx_underrun=%0d idle_ins=%0d idle_del=%0d",
+      "frames=%0d crc_err=%0d preamble_err=%0d invalid_block=%0d slip=%0d fec_corr=%0d fec_uncorr=%0d tx_underrun=%0d idle_ins=%0d idle_del=%0d rxpin_ins=%0d rxpin_del=%0d rxpin_midframe=%0d hi_ber=%0d",
       asm.frames_seen, asm.crc_err_count, asm.preamble_err_count,
       bfm.invalid_block_count, bfm.get_slip_count(),
       bfm.get_fec_corrected(), bfm.get_fec_uncorrectable(),
-      bfm.tx_underrun_count, bfm.idle_ins_count, bfm.idle_del_count), UVM_LOW)
+      bfm.tx_underrun_count, bfm.idle_ins_count, bfm.idle_del_count,
+      bfm.rxpin_ins_count, bfm.rxpin_del_count, bfm.rxpin_midframe_underrun,
+      bfm.get_hi_ber_count()),
+      UVM_LOW)
   endfunction
 
   // 链路复位后由测试调用：丢弃被复位斩断的半帧装配状态

@@ -114,9 +114,14 @@ class fec_cl74_decoder_c;
   // 对齐锁定需要的连续干净码字数
   localparam int LOCK_CLEAN = 2;
 
+  // 锁定后连续不可纠码字达此数即判失锁、回搜索态（实现取值：链路断/
+  // 对端重启使码字边界漂移时自动重锁，也避免病态流反复做纠错扫描）
+  localparam int UNLOCK_BAD = 8;
+
   protected logic bitbuf[$];       // 候选对齐位置起的 bit 缓冲
   protected bit   locked;
   protected int   clean_cnt;       // 未锁定时连续干净码字计数
+  protected int   bad_run;         // 锁定后连续不可纠码字计数
 
   // 统计：可纠/不可纠计数与 slip 次数，供记分板与单测检查
   int corrected_count;
@@ -137,6 +142,7 @@ class fec_cl74_decoder_c;
     bitbuf.delete();
     locked    = 0;
     clean_cnt = 0;
+    bad_run   = 0;
   endfunction
 
   function bit is_locked();
@@ -145,8 +151,8 @@ class fec_cl74_decoder_c;
 
   // 推入一个线路 bit。集满一个候选码字后：
   //  - 未锁定：伴随式为零计连续干净数，达标锁定；非零则 slip 1 bit 重试。
-  //  - 已锁定：伴随式非零先尝试突发纠错；不可纠计数后透传（Clause 74
-  //    无失锁回退，链路质量由上层监控）。
+  //  - 已锁定：伴随式非零先尝试突发纠错；不可纠计数后透传，连续
+  //    UNLOCK_BAD 个不可纠则失锁回搜索态。
   // 返回 1 时 blks_out 携带 32 个重建的 66b 块。
   function bit push_bit(logic b, output block66_t blks_out[FEC_BLOCKS]);
     logic cw[FEC_N];
@@ -167,7 +173,9 @@ class fec_cl74_decoder_c;
         bitbuf.delete();
         if (clean_cnt >= LOCK_CLEAN) locked = 1;
 
-        // 锁定前的干净码字也向上递交：避免丢失锁定判据消耗的数据
+        // 锁定前的干净码字也向上递交：让解扰器与 MLD（多 lane 时靠它收
+        // AM）持续有块可吃；单 lane 下是否交给 MAC/monitor 由 BFM 按
+        // rx_link_up 把关（锁定前丢弃）
         unpack_blocks(cw, blks_out);
         return 1;
       end
@@ -183,14 +191,22 @@ class fec_cl74_decoder_c;
     bitbuf.delete();
 
     if (syn != 0) begin
-      // 保护：不可纠码字连续大量出现（链路结构性损坏）时停用纠错搜索
-      // —— try_correct 全位置扫描代价高，病态流下会拖死仿真
-      if (uncorrectable_count > 50) begin
-        uncorrectable_count++;
+      if (try_correct(cw, syn)) begin
+        corrected_count++;
+        bad_run = 0;
       end
-      else if (try_correct(cw, syn)) corrected_count++;
-      else                           uncorrectable_count++;
+      else begin
+        uncorrectable_count++;
+        bad_run++;
+        if (bad_run >= UNLOCK_BAD) begin
+          locked    = 0;
+          clean_cnt = 0;
+          bad_run   = 0;
+          slip_count++;
+        end
+      end
     end
+    else bad_run = 0;
 
     unpack_blocks(cw, blks_out);
     return 1;

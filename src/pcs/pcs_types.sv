@@ -27,6 +27,9 @@ localparam byte unsigned XGMII_ERROR = 8'hfe;
 // 序集起始字符（Sequence ordered set，如 Local/Remote Fault）
 localparam byte unsigned XGMII_SEQ   = 8'h9c;
 
+// 信号序集起始字符（Signal ordered set，/Fsig/；O 码 0xF）
+localparam byte unsigned XGMII_FSIG  = 8'h5c;
+
 // ---------------- 66b 块同步头（IEEE 802.3 49.2.4.3） ----------------
 
 // 数据块同步头：8 字节全为数据
@@ -49,6 +52,11 @@ localparam byte unsigned BT_START4   = 8'h33;
 // 序集块：O0 + C4..C7 / O0 + O4（Local/Remote Fault 等经由这两种块传输）
 localparam byte unsigned BT_OSET0    = 8'h4b;
 localparam byte unsigned BT_OSET2    = 8'h55;
+
+// 序集在 lane4：C0..C3 + O4 + D5..D7；序集 + lane4 起始：O0 + S4 + D5..D7
+//（与 0x33/0x55 同属 Clause 49 专有块型，Clause 82 无）
+localparam byte unsigned BT_OSET4    = 8'h2d;
+localparam byte unsigned BT_OSET0_S4 = 8'h66;
 
 // 帧终止于 lane k：D0..D(k-1) + T + 其后 C 码
 localparam byte unsigned BT_TERM0    = 8'h87;
@@ -100,5 +108,17 @@ function automatic xgmii64_t xgmii_all_idle();
   xgmii64_t w;
   w.ctl = 8'hff;
   for (int i = 0; i < 8; i++) w.data[i*8 +: 8] = XGMII_IDLE;
+  return w;
+endfunction
+
+// Local Fault 拍（IEEE LBLOCK_R 的 64bit XGMII 视图）。Clause 49
+//（49.2.13.2.1）LBLOCK_R 含两个 LF 有序集：lane0 与 lane4 各为 /Q/（0x9C）
+// + 00 00 01（编码为 0x55 块）；Clause 82（40G/100G/200G，cl82=1）只含
+// 一个：lane0 为 /Q/ + 00 00 01，lane4~7 为 4 个零数据字节（0x4B 块）。
+// RX 未锁定或 hi_ber 时 PCS 向 MAC 持续输出此拍
+function automatic xgmii64_t xgmii_local_fault(bit cl82 = 0);
+  xgmii64_t w;
+  w.ctl  = cl82 ? 8'h01 : 8'h11;
+  w.data = cl82 ? 64'h00000000_0100009c : 64'h0100009c_0100009c;
   return w;
 endfunction

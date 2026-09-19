@@ -37,13 +37,17 @@ make disturb_1g         # 1G 链路扰动恢复
 make loopback_2p5g      # 2.5G 环回冒烟
 make stress_2p5g        # 2.5G 大流量 1000 帧
 make multi_reset_2p5g   # 2.5G 5 轮中途复位恢复
+make disturb_2p5g       # 2.5G 链路扰动恢复
 make svt_1g             # 1G 与 svt VIP 交叉
 make svt_2p5g           # 2.5G 与 svt VIP 交叉
 make svt_1g_reset       # 1G 交叉中途复位恢复（3 轮复位，VIP 持续在线）
 make svt_2p5g_reset     # 2.5G 交叉中途复位恢复
 ```
 
-同一个 simv，`+SPEED=1g` / `+SPEED=2.5g` 切换，无需重编译。
+同一个 simv，`+SPEED=1g` / `+SPEED=2.5g` 切换，无需重编译。两种速率的
+6 列（环回 / 1000 帧 / 多次复位 / 扰动 / VIP 交叉 / 交叉复位）齐全；各列
+内容与判据（grep 汇总行 + 日志 `UVM_ERROR : 0`、`UVM_FATAL : 0`）见
+`verification_matrix.md`。
 
 ## 3. top 层集成
 
@@ -67,6 +71,8 @@ gmii_if dut_gmii (gmii_clk, rst_n);   // DUT 的 GMII 接这里
 initial uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top",
                                              "vif_gmii_a", dut_gmii);
 // test 里：cfg.basex = 1; cfg.vif_gmii = <上面的句柄>;
+// 注：agent build 仍校验 cfg.vif_xgmii 非空（BASE-X 下不使用），挂任一
+// xgmii_if 实例即可
 ```
 
 ## 4. 行为要点
@@ -77,28 +83,36 @@ initial uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top",
 - **运行不均等性**：idle 选 /I1/（K28.5 D5.6）还是 /I2/（K28.5 D16.2）
   由当前 RD 决定，保证 idle 期间 RD 回到负。
 - **弹性**：GMII 时钟 +100ppm（删除主导域），TX 码组队列超 12 个即删
-  一整个 /I/（20bit），只删帧间 idle、永不伤帧。
+  一整个 /I/（20bit），只删帧间 idle、永不伤帧。RX 引脚侧同样只在帧间
+  （rx_dv=0）补拍或删一个 idle 字节，水位按实测突发自适应；帧内见底计入
+  `rxpin_midframe_underrun`，非复位/扰动测试断言为 0。
 - **同步**：3 个无错逗号码组得同步，4 个连续无效码组失同步；逗号出现
   在当前对齐相位之外即重新对齐。
 - `rx_locked()` 在 BASE-X 下表示同步已得，既有 `wait_link_up()` 流程不改。
+- **无 Local Fault / hi_ber**：GMII 没有序集，失同步期间 RX 引脚只是
+  rx_dv=0；BASE-R 模式下 XGMII RX 引脚持续输出 Local Fault 的信令不适用
+  （`link_fault` 测试也不适用）。BER 监视只在 64b/66b 模式，BASE-X 下
+  `rx_link_up()` 与 `rx_locked()` 等价。
 - 8b/10b 解码表由编码器反推生成（遍历 256 D + 5 K × 两种 RD），保证
   解码是编码的严格逆。
 - **接收端容忍前导收缩**：对端 PCS 在 tx_en 落奇数位时可能丢掉一个前导
   字节来对齐 /S/（svt VIP 即如此，实测约一半帧前导只有 6 字节）。monitor
   按 SFD 定位帧起点，前导 0x55 有 1~7 个都算合法（802.3 对 MAC 的要求）。
   若自己写 GMII 侧 checker，切勿写死"7×0x55 + SFD"。
-- 与 VIP 交叉：`make svt_1g` / `make svt_2p5g` 实测均为 A 500/500 bad=0、
-  B 1000/1000，UVM_ERROR=0、UVM_WARNING=0（VIP 全套协议 checker 开启）；
-  交叉复位 `svt_1g_reset` / `svt_2p5g_reset` 3 轮全过。
+- 与 VIP 交叉（VIP 全套协议 checker 开启）：`make svt_1g` / `make svt_2p5g`
+  判 A 500/500 bad=0、B 1000/1000；交叉复位 `svt_1g_reset` /
+  `svt_2p5g_reset` 判 3 轮复位全过、末段 A 100/100 bad=0、B 200/200；
+  两者都要求日志 `UVM_ERROR : 0`、`UVM_FATAL : 0`。
 - **VIP 2.5G 的位钟就是我们供给的 `serial_basex_clk`**（波形探针实测：
   默认 1.25GHz 下 VIP 2.5G 码流位周期为 800ps）。所以 +SPEED=2.5g 时
   时钟宏把 basex 串行钟改为 3.125GHz、GMII 312.5MHz、XGMII 39.0625MHz
-  （VIP 文档值），其余模式时钟不变。
+  （VIP 文档值），其余时钟不变。
 
 ## 5. 已知限制（TODO）
 
 - Clause 37 自协商（/C/ 配置有序集交换）未实现，上电直接进数据态；与
   VIP 交叉时 VIP 侧须 `enable_an37_mode = 0`。
 - 同步 FSM 为简化版（未实现 good_cgs 回升计数细节）。
-- 不与 FEC / MLD / AN(cl73) / LT / 直驱叠加（agent build 阶段校验拦截）。
+- 不与 FEC / MLD / AN(cl73) / LT / 直驱 / lane4 起帧叠加（agent build
+  阶段校验拦截）。
 - SGMII / 100M / 10M（同属 8b/10b 族，速率适配靠字节复制）未做。

@@ -23,14 +23,22 @@ class eth_pcs_cfg extends uvm_object;
   // 路径，66b 级不加扰（加扰在 257b 层）。不与其它 FEC/AN/LT 叠加。
   bit cl119 = 0;
 
+  // 400GBASE-R mode (Clause 119 CDBI): 16 physical NRZ lanes, each carrying
+  // one of four interleaved RS(544,514) codewords.  This is kept separate
+  // from cl119 because the 200G and 400G VIP modes have different lane
+  // counts, AM patterns and CDBI packing even though both use Clause 119
+  // transcoding/RS-FEC.
+  bit cl400 = 0;
+
   // BASE-X 模式（1000BASE-X / 2.5GBASE-X）：8b/10b + Clause 36 有序集，
   // MAC 侧走 vif_gmii。与 FEC/MLD/AN/LT/直驱均不叠加（agent 校验）。
   bit basex = 0;
 
-  // RS-FEC（Clause 91，RS(528,514) over GF(2^10)）使能：与 fec_enable
-  // 互斥（两者是不同的码，不叠加）。开启后 TX 走 256B/257B 转码 +
-  // RS 编码，RX 反向；纠错能力 7 个 10bit 符号/码字。
-  // 注：VIP 的 RS-FEC 只绑定 100G CSBI 接口，交叉验证随 100G 一并做。
+  // RS-FEC（RS(528,514) over GF(2^10)）使能：与 fec_enable 互斥（两者是
+  // 不同的码，不叠加）。开启后 TX 走 256B/257B 转码 + RS 编码，RX 反向；
+  // 纠错能力 7 个 10bit 符号/码字。单 lane 为 Clause 108 码流（25G 与
+  // VIP ETH_25G_SERIAL 交叉）；num_lanes=20/num_phys=4 为 100G Clause 91
+  //（4 FEC lane，与 VIP ETH_CSBI_4_LANE 交叉）
   bit rs_fec_enable = 0;
 
   // 主动模式：1 = 例化 sequencer/driver 充当 MAC 发流；0 = 仅 BFM+monitor
@@ -39,6 +47,11 @@ class eth_pcs_cfg extends uvm_object;
   // 每帧之后驱动的全空闲拍数（8 字节/拍；2 拍 = 16 字节 ≥ 最小 IPG 12）
   int idle_words_per_gap = 2;
 
+  // lane4 起帧：1 = driver 奇数帧从 lane4 起（S 落 lane4，块型 0x33），
+  // 模拟 32bit XGMII 内核 MAC 的交替起点。仅 Clause 49 单 lane（10G/5G）
+  // 合法；多 lane（Clause 82）与 BASE-X 由 agent 拦截
+  bit lane4_start = 0;
+
   // XGMII 直驱模式（纯 MAC 功能验证提速用）：1 = 跳过 PCS/串行整条链路，
   // driver 的帧直接展开成 XGMII 拍经 BFM 驱向对端（rxd/rxc），对端 MAC
   // 发来的 XGMII 拍（txd/txc）直接采样交 monitor 装配。发包序列零适配。
@@ -46,13 +59,20 @@ class eth_pcs_cfg extends uvm_object;
   //（test 置本位 + 宏关位钟省事件 + lb_env 环回 force 接线）。
   bit xgmii_direct = 0;
 
-  // 多 lane（Clause 82 MLD，40G=4）：1 = 单 lane 经典路径；>1 时启用
-  // MLD 分发/重组，串行接口用 vif_serial_lanes[0..num_lanes-1]，
-  // vif_serial 不用。MLD 模式下 fec_enable 必须为 0（未支持叠加）。
+  // 多 lane（Clause 82 MLD，40G=4、100G=20；200G cl119 为 8）：1 = 单 lane
+  // 经典路径；>1 时启用多 lane 路径，串行接口用 vif_serial_lanes[]，
+  // vif_serial 不用。fec_enable 可叠加（每 PCS lane 一套 Clause 74）。
   int num_lanes = 1;
 
   // 每 lane AM 间隔（标准 16384；仿真提速可调小，两端一致即可）
   int am_spacing = 16384;
+
+  // BER 监视（hi_ber）参数：窗口块数与窗口内非法同步头上限。默认
+  // 10GBASE-R（125us = 19531 块、16 个）；25G/40G/100G/200G 应置
+  // 781250 / 97（IEEE 2ms/1.25ms/500us 窗口换算成块数，同为 97 个）。
+  // 5G 暂沿用 10G 值。hi_ber 期间 RX 向 MAC 输出 Local Fault
+  int ber_limit         = 16;
+  int ber_window_blocks = 19531;
 
   // 物理串行 lane 数（PMA bit 复用）：0 = 与 num_lanes 相同（40G 4:4）；
   // 100G CAUI-10 为 10（20 条 PCS lane 以 2:1 按 bit 交织上 10 条物理
@@ -62,14 +82,21 @@ class eth_pcs_cfg extends uvm_object;
 
   // Clause 73 自协商（KR 电口建链）：1 = 上电先走 AN（DME 页交换），
   // 协商完成后自动切入数据模式（PCS 码流）；0 = 直接进数据模式
-  //（force 速率，既有行为）。单 lane 路径有效；多 lane/FEC 叠加未做。
+  //（force 速率，既有行为）。仅单 lane 路径（多 lane 由 test 拦截）；
+  // 基页 FEC 能力位恒 0（不协商 FEC）。
   bit an_enable = 0;
 
   // 本端 advertise 的技术能力位（A[24:0]，默认 A2 = 10GBASE-KR）
   logic [24:0] an_ability = 25'h4;
 
-  // 本端 Transmit Nonce（两端须不同，全 0 会被判为碰撞）
+  // 本端 Transmit Nonce（两端应不同；相同则检出碰撞、随机换 nonce 重协商）
   logic [4:0] an_nonce = 5'h05;
+
+  // AN 完成后的链路失效门限（IEEE link_fail_inhibit 的等效）：数据模式下
+  // RX 链路持续不可用（失锁或 hi_ber）超过此时长即重新协商。须大于本端
+  // 锁定时间与两端切换数据模式的时间差（实测均 < 2us）；IEEE 为 500ms
+  // 实时，此处按仿真缩放
+  realtime an_link_fail_inhibit = 20us;
 
   // Clause 72 链路训练（KR 建链第二步，紧随 AN）：1 = AN 完成后先训练
   // 再进数据模式；0 = 跳过训练直接进数据（既有行为）。可独立于 AN 使用

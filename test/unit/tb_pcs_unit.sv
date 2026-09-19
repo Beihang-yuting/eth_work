@@ -65,6 +65,63 @@ module tb_pcs_unit;
     $display("[OK] codec roundtrip x2000");
   endtask
 
+  // 1b. 块型补全：Clause 49 lane4 起始/序集的黄金值（IEEE 图 49-7 位布局）、
+  //     Clause 82 序集（lane4~7 零数据）与 Clause 49 专有块型拒收、/Fsig/
+  task automatic test_codec_ext();
+    logic [7:0]  gc[5] = '{8'h1f, 8'h1f, 8'h11, 8'h11, 8'hf1};
+    logic [63:0] gd[5] = '{64'h0100009c_07070707, 64'h555555fb_07070707,
+                           64'h555555fb_0100009c, 64'h0100009c_0100009c,
+                           64'h07070707_0100009c};
+    logic [63:0] gp[5] = '{64'h01000000_0000002d, 64'h55555500_00000033,
+                           64'h55555500_01000066, 64'h01000000_01000055,
+                           64'h00000000_0100004b};
+    xgmii64_t w, wo, w82;
+    block66_t b;
+    for (int i = 0; i < 5; i++) begin
+      w.ctl  = gc[i];
+      w.data = gd[i];
+      b = pcs_codec::encode(w);
+      check("codec ext: sync", b.sync == SYNC_CTRL);
+      check("codec ext: golden payload", b.payload == gp[i]);
+      check("codec ext: decode ok", pcs_codec::decode(b, wo));
+      check("codec ext: roundtrip", wo == w);
+      if (gp[i][7:0] != BT_OSET0) begin
+        check("codec ext: cl82 rejects cl49-only", !pcs_codec::decode(b, wo, 1));
+        check("codec ext: cl82 encodes error", pcs_codec::encode(w, 1) == pcs_codec::error_block());
+      end
+    end
+    // LF：Clause 49 LBLOCK_R 为两个 LF 有序集（0x55 块，即黄金值 gp[3]）；
+    // Clause 82 为一个 LF 有序集 + 4 零数据字节（0x4B 零尾块）
+    w   = xgmii_local_fault(0);
+    w82 = xgmii_local_fault(1);
+    b   = pcs_codec::encode(w);
+    check("codec ext: cl49 LF = 0x55 x2 /Q/", b.sync == SYNC_CTRL && b.payload == gp[3]);
+    b   = pcs_codec::encode(w82, 1);
+    check("codec ext: cl82 LF = 0x4B zero tail", b.sync == SYNC_CTRL && b.payload == gp[4]);
+    check("codec ext: cl82 LF decode", pcs_codec::decode(b, wo, 1) && wo == w82);
+    check("codec ext: cl82 rejects cl49 LF word", pcs_codec::encode(w, 1) == pcs_codec::error_block());
+    // /Fsig/ = O 码 F（仅 Clause 49）；保留 O 码判非法
+    w.data[7:0] = XGMII_FSIG;
+    b = pcs_codec::encode(w);
+    check("codec ext: fsig O=F", b.payload[35:32] == 4'hf);
+    check("codec ext: fsig roundtrip", pcs_codec::decode(b, wo) && wo == w);
+    b.payload[35:32] = 4'h3;
+    check("codec ext: reserved O invalid", !pcs_codec::decode(b, wo));
+    // Clause 82 无 /Fsig/：编码出 ERROR 块，O=F 的 0x4B 判非法
+    w82.data[7:0] = XGMII_FSIG;
+    check("codec ext: cl82 fsig encodes error", pcs_codec::encode(w82, 1) == pcs_codec::error_block());
+    b = pcs_codec::encode(xgmii_local_fault(1), 1);
+    b.payload[35:32] = 4'hf;
+    check("codec ext: cl82 fsig block invalid", !pcs_codec::decode(b, wo, 1));
+    // Clause 82 模式下 lane0 起始/数据/终止/IDLE 照常闭环
+    repeat (2000) begin
+      w = random_legal_word();
+      check("codec ext: cl82 decode ok", pcs_codec::decode(pcs_codec::encode(w, 1), wo, 1));
+      check("codec ext: cl82 roundtrip", wo == w);
+    end
+    $display("[OK] codec ext: 0x2D/0x33/0x66/0x55/0x4B 黄金值 + Clause 82 序集/拒收/闭环 + Fsig");
+  endtask
+
   // 2. 扰码闭环
   task automatic test_scrambler();
     scrambler_c   s = new();
@@ -122,6 +179,28 @@ module tb_pcs_unit;
         check("bsync: block match", got[i] == sent[base + i]);
     end
     $display("[OK] block sync, prefix=%0d slips=%0d", prefix, bs.slip_count);
+  endtask
+
+  // 3b. BER 监视：窗内坏头达上限即 hi_ber；置位窗口结束仍保持，下一个
+  //     干净完整窗口结束才清除；坏头不足上限的窗口不置位；reset 立即清
+  task automatic test_ber_mon();
+    ber_mon_c m = new(16, 100);
+    for (int i = 0; i < 100; i++) m.push_sh(i >= 15);
+    check("ber: 15/100 not hi_ber", !m.is_hi_ber());
+    for (int i = 0; i < 16; i++) m.push_sh(0);
+    check("ber: 16 bad -> hi_ber", m.is_hi_ber());
+    for (int i = 16; i < 100; i++) m.push_sh(1);
+    check("ber: hold through set window", m.is_hi_ber());
+    for (int i = 0; i < 99; i++) m.push_sh(1);
+    check("ber: hold until clean window ends", m.is_hi_ber());
+    m.push_sh(1);
+    check("ber: cleared after clean window", !m.is_hi_ber());
+    check("ber: count", m.hi_ber_count == 1);
+    for (int i = 0; i < 16; i++) m.push_sh(0);
+    check("ber: set again", m.is_hi_ber());
+    m.reset();
+    check("ber: reset clears", !m.is_hi_ber());
+    $display("[OK] ber monitor (limit/window/clear/reset)");
   endtask
 
   // 4. FEC：干净锁定 -> 可纠 burst -> 不可纠 burst
@@ -257,7 +336,7 @@ module tb_pcs_unit;
   // 5. 帧 <-> XGMII 闭环
   task automatic test_frame_utils();
     frame_assembler_c asm = new();
-    repeat (50) begin
+    for (int n = 0; n < 50; n++) begin
       byte unsigned frame[$];
       xgmii64_t     words[$];
       frame_assembler_c::frame_result_t tmp;
@@ -268,8 +347,14 @@ module tb_pcs_unit;
       frame.delete();
       repeat (len) frame.push_back($urandom);
 
-      eth_frame_to_words(frame, words);
+      // 奇数轮 lane4 起帧；各拍先过 Clause 49 编解码（覆盖 0x33 块）
+      eth_frame_to_words(frame, words, n[0]);
       words.push_back(xgmii_all_idle());   // 帧后 IPG
+      foreach (words[i]) begin
+        xgmii64_t wd;
+        check("frame: codec ok", pcs_codec::decode(pcs_codec::encode(words[i]), wd));
+        check("frame: codec roundtrip", wd == words[i]);
+      end
 
       // 注意：output 参数每次调用都会拷出，返回 0 的调用会覆盖 tmp，
       // 因此命中时必须立即另存
@@ -285,7 +370,7 @@ module tb_pcs_unit;
       check("frame: len", res.data.size() == len);
       foreach (frame[i]) check("frame: byte match", res.data[i] == frame[i]);
     end
-    $display("[OK] frame utils roundtrip x50");
+    $display("[OK] frame utils roundtrip x50（含 lane4 起帧 x25，逐拍过编解码）");
   endtask
 
   // 6. MLD：4 lane 分发 -> 注入偏斜 + 物理乱接 -> 识别/去偏/重组闭环
@@ -358,6 +443,74 @@ module tb_pcs_unit;
              sent.size());
   endtask
 
+  // 6c. MLD AM 误码容忍（IEEE Clause 82 am_invld_cnt）：对齐后单个坏 AM 只跳过 ——
+  //     不重对齐、数据块一个不丢；同一 lane 连续 4 个坏 AM 才整体重对齐
+  task automatic test_mld_am_err();
+    localparam int LANES = 4;
+    localparam int SPACING = 64;
+
+    for (int scen = 0; scen < 3; scen++) begin
+      mld_tx_c  tx = new(LANES, SPACING);
+      mld_rx_c  rx = new(LANES, SPACING);
+      block66_t sent[$];
+      block66_t got[$];
+      block66_t lane_stream[LANES][$];
+      int       am_idx[LANES][$];
+      int       maxlen = 0;
+
+      repeat (4000) begin
+        block66_t b, am_b;
+        int lane;
+        bit am_v;
+        b.sync    = SYNC_DATA;
+        b.payload = {$urandom, $urandom};
+        sent.push_back(b);
+        tx.push_block(b, lane, am_v, am_b);
+        if (am_v) begin
+          am_idx[lane].push_back(lane_stream[lane].size());
+          lane_stream[lane].push_back(am_b);
+        end
+        lane_stream[lane].push_back(b);
+      end
+
+      // 场景 0：lane1 第 4 个 AM 单 bit 误码；场景 1：lane2 第 3~6 个 AM 连坏；
+      // 场景 2：lane1 对齐后首个 AM（第 2 个）误码且 lane1 先到 —— 落在 AM
+      // 间隔学得之前，须在学得间隔时检出该 lane 越位并整体重对齐
+      if (scen == 0)
+        lane_stream[1][am_idx[1][3]].payload[0] ^= 1'b1;
+      else if (scen == 1)
+        for (int k = 2; k < 6; k++) lane_stream[2][am_idx[2][k]].payload[0] ^= 1'b1;
+      else
+        lane_stream[1][am_idx[1][1]].payload[0] ^= 1'b1;
+
+      foreach (lane_stream[p])
+        if (lane_stream[p].size() > maxlen) maxlen = lane_stream[p].size();
+      for (int k = 0; k < maxlen; k++)
+        for (int p = 0; p < LANES; p++) begin
+          block66_t ob;
+          int       pp = (scen == 2) ? (p + 1) % LANES : p;   // 场景 2 lane1 先到
+          if (k < lane_stream[pp].size()) rx.push_block(pp, lane_stream[pp][k]);
+          while (rx.pop_block(ob)) got.push_back(ob);
+        end
+
+      if (scen == 0) begin
+        check("mld am-err: no realign", rx.realign_count == 0);
+        check("mld am-err: tolerated", rx.am_bad_count == 1);
+        check("mld am-err: got count", got.size() == sent.size());
+        foreach (got[i]) check("mld am-err: block order", got[i] == sent[i]);
+      end
+      else if (scen == 1) begin
+        check("mld am-err: 4 bad AMs realign", rx.realign_count == 1);
+        check("mld am-err: realigned", rx.is_aligned());
+      end
+      else begin
+        check("mld am-err: missed AM before gap learned -> realign", rx.realign_count == 1);
+        check("mld am-err: realigned after missed AM", rx.is_aligned());
+      end
+    end
+    $display("[OK] mld AM error tolerance (1 bad AM skipped, 4 in a row realign, missed AM before gap learned realign)");
+  endtask
+
   // 6b. MLD 100G：20 lane（表 82-3 AM）+ 随机物理乱接 + 随机偏斜闭环
   task automatic test_mld100();
     localparam int LANES = 20;
@@ -383,6 +536,11 @@ module tb_pcs_unit;
       tmp = perm[j]; perm[j] = perm[k]; perm[k] = tmp;
     end
     for (j = 0; j < LANES; j++) skew[j] = $urandom_range(0, 30);
+    // 偏斜按最小值归零：投递循环要求至少一条 lane 起始偏斜为 0，否则
+    // 全部 lane 永远等待、死循环（随机种子变化时曾实测挂死）
+    tmp = skew[0];
+    for (j = 1; j < LANES; j++) if (skew[j] < tmp) tmp = skew[j];
+    for (j = 0; j < LANES; j++) skew[j] -= tmp;
 
     repeat (8000) begin
       b.sync    = ($urandom_range(0, 1)) ? SYNC_DATA : SYNC_CTRL;
@@ -480,6 +638,30 @@ module tb_pcs_unit;
     check("an73: B done", eb.is_done());
     $display("[OK] an73 arbitration A=%s B=%s pages=%0d/%0d",
              ea.state_name(), eb.state_name(), ea.pages_seen, eb.pages_seen);
+
+    // --- nonce 碰撞：两端同 nonce，须检出碰撞、各自随机换 nonce 后完成 ---
+    ea.nonce = 5'h07;
+    eb.nonce = 5'h07;
+    ea.reset();
+    eb.reset();
+    la = 0;
+    lb = 0;
+    guard = 0;
+    while (!(ea.is_done() && eb.is_done()) && guard < AN73_PAGE_TICKS * 200) begin
+      na = ea.tx_tick();
+      nb = eb.tx_tick();
+      ea.rx_tick(lb);
+      eb.rx_tick(la);
+      la = na;
+      lb = nb;
+      guard++;
+    end
+    check("an73: collision A done", ea.is_done());
+    check("an73: collision B done", eb.is_done());
+    check("an73: collision restarted", ea.restarts + eb.restarts > 0);
+    check("an73: nonces differ", ea.nonce != eb.nonce);
+    $display("[OK] an73 nonce collision resolved: restarts=%0d/%0d nonce=%0d/%0d",
+             ea.restarts, eb.restarts, ea.nonce, eb.nonce);
   endtask
 
   // Clause 72 链路训练：训练帧字段自环 + 双引擎对训收敛
@@ -796,15 +978,19 @@ module tb_pcs_unit;
 
   // RS-FEC 码流：随机块流 TX -> 1/4 条 FEC lane（物理乱接 + 随机偏斜 +
   // 注符号错）-> RX，块逐一比对
-  task automatic test_rs_stream(int nfl);
+  // am_hit=1（仅 4 lane）：定向去偏斜场景 —— FEC lane 0 的首个 AM 被误码
+  // 击中（该 lane 晚一个周期锁定），其余 lane 偏斜更大、锁在更早的 AM 上
+  // 且队列不足一整周期；须整体对齐到第二个 AM，首周期丢弃
+  task automatic test_rs_stream(int nfl, bit am_hit = 0);
     rs91_tx_c     tx = new(nfl);
     rs91_rx_c     rx = new(nfl);
     scrambler_c   s  = new();
     block66_t     sent[$], got[$], b, ob;
     logic         lane_bits[4][$];
     int           perm[4], skew[4], cur[4];
-    int           per, nblk, remaining, match, k, tmp;
+    int           per, nblk, remaining, match, k, tmp, base;
     byte unsigned bts[8];
+    logic         am0;                        // lane0 首 AM 首位原值（am_hit 用）
 
     bts  = '{8'h1E, 8'h78, 8'h87, 8'hFF, 8'h4B, 8'h99, 8'hB4, 8'h33};
     per  = RS91_CW_BITS / nfl;
@@ -828,12 +1014,19 @@ module tb_pcs_unit;
     end
 
     // 注错：每码字每 lane 若干 bit 错（4 lane 各 1、单 lane 5，均 ≤ t=7 符号）
+    am0 = lane_bits[0][0];
     for (int l = 0; l < nfl; l++)
       for (int c = 0; (c + 1) * per <= lane_bits[l].size(); c++)
         repeat (nfl == 1 ? 5 : 1) begin
-          k = c * per + $urandom_range(0, per - 1);
+          // AM 码字避开各 lane 前 128bit（RX 逐 bit 搜 AM 的比对窗，比对在
+          // RS 纠错前）：随机误码若击中会让该 lane 晚锁一至多个周期，场景
+          // 不再确定；"首 AM 被击中"由 am_hit 定向覆盖
+          k = c * per + ((c % RS91_AM_CWS == 0) ? $urandom_range(128, per - 1)
+                                                : $urandom_range(0, per - 1));
           lane_bits[l][k] = ~lane_bits[l][k];
         end
+    // 置为原值取反（不能取当前值反：随机注错恰好命中该位时会被翻回）
+    if (am_hit) lane_bits[0][0] = ~am0;
 
     // 物理乱接 + 各 lane 前置随机偏斜（随机垃圾比特），逐 bit 交错投递
     for (int j = 0; j < nfl; j++) perm[j] = j;
@@ -843,7 +1036,7 @@ module tb_pcs_unit;
     end
     remaining = 0;
     for (int j = 0; j < nfl; j++) begin
-      skew[j] = $urandom_range(0, 700);
+      skew[j] = am_hit ? ((perm[j] == 0) ? 0 : 600) : $urandom_range(0, 700);
       cur[j]  = 0;
       remaining += lane_bits[j].size();
     end
@@ -865,17 +1058,24 @@ module tb_pcs_unit;
     end
 
     // TX 从 AM 码字起发，RX 从第一个 AM 起交付：与发送序直接对位
+    // 随机注错避开 AM 比对窗，全部 lane 在首个 AM 锁定、全量交付；am_hit
+    // 定向场景 lane0 晚一周期锁定，整体从第二个 AM 起交付（丢首周期）
+    base  = nblk - got.size();
     match = 0;
-    for (int i = 4; i < got.size() && i < sent.size(); i++)
-      if (got[i] == sent[i]) match++;
-    check("rs stream: aligned", rx.is_aligned());
-    check("rs stream: all delivered", got.size() == nblk);
+    for (int i = 4; i < got.size() && i + base < sent.size(); i++)
+      if (got[i] == sent[i + base]) match++;
+    check($sformatf("rs stream: aligned (am_hit=%0d got=%0d locks=%0d slip=%0d miss=%0d uncorr=%0d)",
+                    am_hit, got.size(), rx.am_locks, rx.slip_count, rx.am_miss_total,
+                    rx.rs_uncorrectable), rx.is_aligned());
+    check($sformatf("rs stream: delivered from expected AM (am_hit=%0d base=%0d got=%0d locks=%0d slip=%0d uncorr=%0d)",
+                    am_hit, base, got.size(), rx.am_locks, rx.slip_count, rx.rs_uncorrectable),
+          base == (am_hit ? nblk / 3 : 0));
     check("rs stream: all blocks match", match == got.size() - 4);
     check("rs stream: no uncorrectable", rx.rs_uncorrectable == 0);
     check("rs stream: errors corrected", rx.corrected_count() > 0);
     check("rs stream: single lock", rx.am_locks == 1 && rx.slip_count == 0);
-    $display("[OK] rs-fec %0d lane 码流 %0d 块全对（乱接+偏斜+注错），纠错码字 %0d",
-             nfl, match, rx.corrected_count());
+    $display("[OK] rs-fec %0d lane 码流 %0d 块全对（乱接+偏斜+注错%0s），纠错码字 %0d",
+             nfl, match, am_hit ? "+首AM误码定向去偏斜" : "", rx.corrected_count());
   endtask
 
   // RS-FEC VIP 黄金码字：我方转码 + RS 编码须逐位复现 VIP 25G 实抓码字
@@ -1041,7 +1241,10 @@ module tb_pcs_unit;
   endtask
 
   // Clause 119（200G）：随机块流 TX -> 8 lane（随机偏斜 + 物理乱接）-> RX
-  task automatic test_cl119();
+  // am_hit=1：定向场景 —— 逻辑 lane 0 首个 AM 误码（晚一周期锁定）、其余
+  // lane 偏斜更大；另在第 3 周期 lane 5 的 AM 上打 1bit（对齐后单个周期
+  // 起点 AM 不符须容忍、由 RS 纠正，不得重锁）
+  task automatic test_cl119(bit am_hit = 0);
     c119_tx_c tx = new();
     c119_rx_c rx = new();
     block66_t sent[$], got[$], b, ob;
@@ -1077,8 +1280,12 @@ module tb_pcs_unit;
       tmp = perm[j]; perm[j] = perm[k]; perm[k] = tmp;
     end
     for (j = 0; j < C119_LANES; j++) begin
-      skew[j] = $urandom_range(0, 400);
+      skew[j] = am_hit ? ((perm[j] == 0) ? 0 : 300) : $urandom_range(0, 400);
       cur[j]  = 0;
+    end
+    if (am_hit) begin
+      lane_bits[0][0] = ~lane_bits[0][0];
+      lane_bits[5][2 * C119_PERIOD] = ~lane_bits[5][2 * C119_PERIOD];
     end
 
     remaining = 0;
@@ -1115,26 +1322,32 @@ module tb_pcs_unit;
       if (got[i] == sent[first + i]) match++;
     check("cl119: all blocks match", match == got.size());
     check("cl119: no rs error", rx.rs_uncorrectable == 0);
-    $display("[OK] cl119 200G 8 lane TX->RX %0d 块全对（随机乱接+偏斜）, AM锁 %0d",
-             match, rx.am_locks);
+    check("cl119: no realign", rx.realign_count == 0);
+    $display("[OK] cl119 200G 8 lane TX->RX %0d 块全对（随机乱接+偏斜%0s）, AM锁 %0d",
+             match, am_hit ? "+首AM误码定向去偏斜+周期AM单bit误码" : "", rx.am_locks);
   endtask
 
   initial begin
     test_codec();
+    test_codec_ext();
     test_scrambler();
     test_block_sync();
+    test_ber_mon();
     test_fec();
     test_frame_utils();
     test_mld();
+    test_mld_am_err();
     test_mld100();
     test_an73();
     test_lt72();
     test_rs91();
     test_rs_stream(1);
     test_rs_stream(4);
+    test_rs_stream(4, 1);
     test_rs25_golden();
     test_rs544();
     test_cl119();
+    test_cl119(1);
     test_8b10b();
     test_basex();
     $display("UNIT_TEST_PASS (%0d checks)", test_count);

@@ -118,3 +118,56 @@ class block_sync_c;
   endfunction
 
 endclass
+
+// BER 监视（IEEE 49.2.13.2.6 / 82.2.18.3.4 BER monitor）：锁定后按块统计
+// 非法同步头，一个窗口内达到 limit 即 hi_ber；此后首个坏头数 < limit 的
+// 完整窗口结束时清除。hi_ber 期间 PCS 向 MAC 输出 Local Fault 并丢弃数据。
+// IEEE 窗口按时间计（10G 125us、25G 2ms、40G 1.25ms、100G 500us），这里
+// 换算成块数：10GBASE-R 19531 块 / 16 个；25G/40G/100G 均为 781250 块 /
+// 97 个。失锁（!block_lock / !align_status）时由 BFM 调 reset()
+class ber_mon_c;
+
+  int limit;
+  int window_blocks;
+
+  protected int  blk_cnt;
+  protected int  bad_cnt;
+  protected bit  hi_ber;
+
+  // 进入 hi_ber 的次数（跨复位保留，统计用）
+  int hi_ber_count;
+
+  function new(int limit = 16, int window_blocks = 19531);
+    this.limit         = limit;
+    this.window_blocks = window_blocks;
+    hi_ber_count       = 0;
+    reset();
+  endfunction
+
+  function void reset();
+    blk_cnt = 0;
+    bad_cnt = 0;
+    hi_ber  = 0;
+  endfunction
+
+  function bit is_hi_ber();
+    return hi_ber;
+  endfunction
+
+  // 每个交付块调用一次：sh_valid = 同步头为 01/10
+  function void push_sh(bit sh_valid);
+    if (!sh_valid && bad_cnt < limit) begin
+      bad_cnt++;
+      if (bad_cnt >= limit && !hi_ber) begin
+        hi_ber = 1;
+        hi_ber_count++;
+      end
+    end
+    if (++blk_cnt >= window_blocks) begin
+      if (bad_cnt < limit) hi_ber = 0;
+      blk_cnt = 0;
+      bad_cnt = 0;
+    end
+  endfunction
+
+endclass

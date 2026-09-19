@@ -8,8 +8,9 @@
 //     以 AM 位置对齐去偏斜、移除 AM 后轮转重组回单一块流。
 // 依赖：pcs_types.sv（block66_t、SYNC_CTRL）。
 // 所有权：BFM 每方向各持一个实例（num_lanes>1 时启用）；reset() 清对齐。
-// 简化说明（记 TODO）：Clause 74 FEC 与 MLD 叠加未实现（MLD 模式
-//   FEC 须关）。BIP-8 已按表 82-4 实现（TX 生成 + RX 校验计数）。
+// Clause 74 FEC 叠加由 BFM 在各 PCS lane 上完成（本类只见 66b 块）。
+// BIP-8 已按表 82-4 实现（TX 生成 + RX 校验计数）；对齐后单个 AM 误码
+// 跳过、连续 4 个才重对齐（IEEE Clause 82 AM 锁定状态机的 am_invld_cnt）。
 // -----------------------------------------------------------------------------
 
 // 支持的最大 PCS lane 数（40G=4；100G=20）
@@ -150,6 +151,12 @@ class mld_rx_c;
   protected longint push_tick;
   protected longint last_am_tick[MLD_MAX_LANES];
 
+  // 对齐态下期望 AM 的位置收到非 AM（AM 误码）的连续次数。IEEE
+  // Clause 82 AM 锁定状态机：连续 4 个坏 AM（am_invld_cnt）才失去 am_lock；单个 AM 误码只跳过
+  localparam int AM_INVLD_LIMIT = 4;
+  protected int am_bad_run[MLD_MAX_LANES];
+  int am_bad_count;                 // 被容忍的坏 AM 总数（统计）
+
   function new(int lanes, int spacing);
     num_lanes  = lanes;
     am_spacing = spacing;
@@ -163,6 +170,7 @@ class mld_rx_c;
     foreach (am_seen[i]) am_seen[i] = 0;
     foreach (since_am[i]) since_am[i] = 0;
     foreach (last_am_tick[i]) last_am_tick[i] = 0;
+    foreach (am_bad_run[i]) am_bad_run[i] = 0;
     push_tick   = 0;
     learned_gap = -1;
     aligned = 0;
@@ -181,7 +189,24 @@ class mld_rx_c;
     int l = mld_am_lane(num_lanes, b);
     push_tick++;
 
+    // 期望 AM 的位置收到非 AM：按 AM 占位跳过（不入队），连续
+    // AM_INVLD_LIMIT 个才整体重对齐 —— 否则单 bit 误码落在 AM 上即重对齐
+    if (l < 0 && aligned && learned_gap >= 0 && since_am[phys] == learned_gap) begin
+      am_bad_count++;
+      if (++am_bad_run[phys] >= AM_INVLD_LIMIT) begin
+        realign_count++;
+        $display("[MLD_REALIGN] @%0t am-invalid phys=%0d run=%0d",
+                 $time, phys, am_bad_run[phys]);
+        reset();
+        return;
+      end
+      since_am[phys] = 0;
+      bip_rx[phys]   = mld_bip_acc('0, b);
+      return;
+    end
+
     if (l >= 0) begin
+      am_bad_run[phys] = 0;
       am_seen[phys]++;
 
       // BIP 校验：AM 携带的 BIP3 应等于本 lane 上一周期累计值。
@@ -207,6 +232,22 @@ class mld_rx_c;
       if (aligned) begin
         if (learned_gap < 0) begin
           learned_gap = since_am[phys];
+          // 学得间隔时已越过该位置的 lane：其对齐后首个 AM 在学习窗内误码、
+          // 被当数据入队（重组已错一块），且此后 since_am 恒大于间隔、不再
+          // 落入 AM 误码容忍检查 —— 立即整体重对齐
+          for (int i = 0; i < num_lanes; i++) begin
+            int pp = phys_of_logical[i];
+            if (pp >= 0 && since_am[pp] > learned_gap) begin
+              realign_count++;
+              $display("[MLD_REALIGN] @%0t missed-am phys=%0d since=%0d learned=%0d",
+                       $time, pp, since_am[pp], learned_gap);
+              reset();
+              phys_of_logical[l] = phys;
+              bip_rx[phys] = mld_bip_acc('0, b);
+              am_seen[phys] = 1;
+              return;
+            end
+          end
         end else if (since_am[phys] != learned_gap) begin
           realign_count++;
           $display("[MLD_REALIGN] @%0t gap-mismatch phys=%0d gap=%0d learned=%0d",

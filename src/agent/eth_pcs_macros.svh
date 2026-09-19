@@ -10,15 +10,15 @@
 // 宏 <-> 速率对照（速率由 +SPEED 运行时选择，无需换宏/换 top）：
 //   eth_pcs_lb_env        全速率一键环回环境（单 lane + 10 条 lane 组 +
 //                         GMII 口超集，推荐入口，见 test/uvm/top.sv）
-//   eth_pcs_clk_gen       全速率（+SPEED 频率表：10g/25g/5g/40g/100g/100g4/
+//   eth_pcs_clk_gen       全速率（+SPEED 频率表：10g/25g/5g/50g/40g/100g/100g4/
 //                         100gr/200g/1g/2.5g；+RSFEC 单 lane 扣 AM 开销）
 //   eth_pcs_ctrl_reset    全速率（复位 + 中途复位/扰动钩子）
 //   eth_pcs_port/vifs/connect        10g/25g/5g 单 lane
 //   （1g/2.5g BASE-X：lb_env 另建 <a>_gmii/<b>_gmii，vif 键 vif_gmii_<x>）
-//   eth_pcs_mld_lanes/connect/vifs   多 lane：40g/100g/100g4/100gr/200g
+//   eth_pcs_mld_lanes/connect/vifs   多 lane：40g/100g/100g4/100gr/200g/400g
 //   eth_pcs_mld_rx_wire   多 lane 接 svt VIP 专用
 //   eth_pcs_connect_svt   10g/25g/5g 接 svt VIP 专用
-//   eth_pcs_svt_clock_gen/wire       svt VIP 全模式（79 路时钟全套）
+//   eth_pcs_svt_clock_gen/wire       svt VIP 全模式（txrx_if 全部时钟端口）
 // FEC 叠加开关（与 +SPEED 正交）：+FEC 开 Clause 74（单 lane 与 40g/100g 每
 // PCS lane）；+RSFEC 开单 lane RS-FEC（25g 即 Clause 108）；100gr 自带
 // Clause 91 RS-FEC（20 PCS lane -> 4 FEC lane）。
@@ -28,7 +28,7 @@
 `define ETH_PCS_MACROS_SVH
 
 // 时钟对：<name>_word_clk / <name>_bit_clk 两根 wire。
-// +SPEED=10g|25g|5g|40g|1g|2.5g 选线速率（默认 10g）；字时钟 = 位钟/66
+// +SPEED=10g|25g|5g|50g|40g|1g|2.5g 选线速率（默认 10g）；字时钟 = 位钟/66
 // （1g/2.5g 为 8b/10b：字节时钟 = 位钟/10，即 GMII 125/312.5MHz；40g
 // 为 4 lane 合流：4×位钟/66 再扣 AM 带宽开销 (sp-1)/sp，sp 由
 // +AM_SPACING 给出，默认 512，须与 test 侧 cfg.am_spacing 一致）并加
@@ -50,17 +50,23 @@
     case (speed_s) \
       "25g":   bit_hz = 25.78125e9; \
       "5g":    bit_hz = 5.15625e9; \
+      /* ETH_50G_SERIAL：VIP PMA gearbox clock = 53.125GHz。 */ \
+      "50g":   bit_hz = 53.125e9; \
       "1g":    bit_hz = 1.25e9; \
       "2.5g":  bit_hz = 3.125e9; \
       "100g4": bit_hz = 25.78125e9; \
       "100gr": bit_hz = 25.78125e9; \
       "200g":  bit_hz = 26.5625e9; \
+      "400g":  bit_hz = 26.5625e9; \
       default: bit_hz = 10.3125e9; \
     endcase \
     if (speed_s == "40g") \
       word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
     else if (speed_s == "100g") \
       word_hz = bit_hz * 10.0 / 66.0 * (am_sp - 1.0) / am_sp; \
+    else if (speed_s == "50g") \
+      /* 50G aggregate MAC rate remains the 781.25MHz LGMII domain. */ \
+      word_hz = 781.25e6; \
     else if (speed_s == "100g4" || speed_s == "100gr") \
       /* 100gr：RS-FEC 转码省出的带宽正好抵掉校验位，AM 开销同 MLD */ \
       word_hz = bit_hz * 4.0 / 66.0 * (am_sp - 1.0) / am_sp; \
@@ -68,6 +74,9 @@
       /* 8 lane × 26.5625G，RS(544,514)+257b 后净 200G = 3.125G 块/s；AM */ \
       /* 周期 16 码字中 4/320 块位让给 AM+填充 -> ×316/320 */ \
       word_hz = 3.125e9 * 316.0 / 320.0; \
+    else if (speed_s == "400g") \
+      /* 400G CDMII：16 × 26.5625G，净 MAC 侧为 6.25GHz × 64bit。 */ \
+      word_hz = 6.25e9; \
     else if (speed_s == "1g" || speed_s == "2.5g") \
       word_hz = bit_hz / 10.0; \
     else \
@@ -143,23 +152,40 @@
   bit pfx``_smii_clk, pfx``_s100g_clk, pfx``_s50g_clk, pfx``_s100g1_clk; \
   bit pfx``_s50g1_clk; \
   realtime pfx``_gmii_half = 4000, pfx``_xgmii_half = 3200, pfx``_sx_half = 400; \
+  /* BASE-R 串行位钟与 XSBI（=位钟/16）：默认 10G；+SPEED=5g 各 ×2 周期 */ \
+  realtime pfx``_sbr_half = 96.97/2.0, pfx``_xsbi_half = 1551.52/2.0; \
   /* 超高速串行钟（半周期 4.7~9.7ps）默认慢速翻转：只保证"在转"防 VIP */ \
   /* 假死，避免拖慢所有 svt 仿真；接对应模式时由 +SPEED 切真实频率 */ \
   realtime pfx``_s100g_half = 4000, pfx``_s50g_half = 4000; \
   realtime pfx``_s100g1_half = 4000, pfx``_s50g1_half = 4000; \
   initial begin \
     string sp_s; \
-    if ($value$plusargs("SPEED=%s", sp_s) && sp_s == "2.5g") begin \
+    void'($value$plusargs("SPEED=%s", sp_s)); \
+    if (sp_s == "2.5g") begin \
       pfx``_gmii_half  = 1600;   /* GMII 312.5MHz */ \
       pfx``_xgmii_half = 12800;  /* XGMII 39.0625MHz（VIP 2.5G 文档值）*/ \
       pfx``_sx_half    = 160;    /* basex 串行 3.125Gbaud */ \
+    end \
+    else if (sp_s == "5g") begin \
+      /* ETH_5G_BASER_SERIAL（VIP txrx_if 5G 时钟表）：XGMII 78.125MHz、 */ \
+      /* 串行 5.15625GHz、XSBI 322.265MHz；10G 值整体 ×2 周期，保持 VIP */ \
+      /* 串化器 16:1 严格比例（与 10G 已验证比例一致）*/ \
+      pfx``_xgmii_half = 6400; \
+      pfx``_sbr_half   = 96.97; \
+      pfx``_xsbi_half  = 1551.52; \
+    end \
+    else if (sp_s == "50g") begin \
+      /* ETH_50G_SERIAL：VIP PMA gearbox clock = 53.125GHz。 */ \
+      /* ETH_50G_1_LANE 的单 lane 变体仍保留 51.5625G 时钟。 */ \
+      pfx``_s50g_half  = 1000.0/53.125/2.0; \
+      pfx``_s50g1_half = 1000.0/51.5625/2.0; \
     end \
   end \
   always #50         pfx``_reference_clk = ~pfx``_reference_clk; \
   always #(pfx``_gmii_half)  pfx``_gmii_clk  = ~pfx``_gmii_clk; \
   always #(pfx``_xgmii_half) pfx``_xgmii_clk = ~pfx``_xgmii_clk; \
-  always #(1551.52/2.0) pfx``_xsbi_clk   = ~pfx``_xsbi_clk; \
-  always #(96.97/2.0)   pfx``_serial_baser_clk = ~pfx``_serial_baser_clk; \
+  always #(pfx``_xsbi_half) pfx``_xsbi_clk = ~pfx``_xsbi_clk; \
+  always #(pfx``_sbr_half)  pfx``_serial_baser_clk = ~pfx``_serial_baser_clk; \
   always #(38.788/2.0)  pfx``_serial_25g_clk   = ~pfx``_serial_25g_clk; \
   always #1600       pfx``_xxgmii_clk    = ~pfx``_xxgmii_clk; \
   always #(620.608/2.0) pfx``_xxvsbi_clk = ~pfx``_xxvsbi_clk; \
@@ -301,16 +327,19 @@
 
 // ---------------- 多 lane（MLD，40G/100G）一键宏 ----------------
 
-// 多 lane 串行接口组：声明 <name>_l[n]（40G n=4；100G 后续 20）
+// 多 lane 串行接口组：声明 <name>_l[n]（按物理 lane 数：40G/100G4 用 4、
+// 200G 用 8、100G CAUI-10 用 10；lb_env 与 top_svt 统一声明 10 条）
 `define eth_pcs_mld_lanes(name, n, bit_clk, rst_n) \
   serial_if name``_l [n] (bit_clk, rst_n);
 
 // 双端多 lane 交叉环回（背靠背拓扑）；err 注到 a->b 的 lane0 ——
 // 多 lane 下单 lane 受扰即破坏重组，足以覆盖扰动恢复场景。
+// los 令 a->b 全部 lane 断线（强制 0），los0 仅断 lane0。
 // 不需要扰动时传 1'b0。
-`define eth_pcs_mld_connect(a, b, n, err) \
+`define eth_pcs_mld_connect(a, b, n, err, los=1'b0, los0=1'b0) \
   for (genvar gi = 0; gi < n; gi++) begin : g_mldconn_``a``_``b \
-    assign b``_l[gi].rx_bit = a``_l[gi].tx_bit ^ ((gi == 0) ? (err) : 1'b0); \
+    assign b``_l[gi].rx_bit = (a``_l[gi].tx_bit & ~((los) | ((gi == 0) ? (los0) : 1'b0))) ^ \
+                              ((gi == 0) ? (err) : 1'b0); \
     assign a``_l[gi].rx_bit = b``_l[gi].tx_bit; \
   end
 
@@ -355,7 +384,7 @@
 // ---------------- 一键环回环境（速率 +SPEED 运行时选择） ----------------
 
 // 展开 = 时钟（+SPEED 频率表）+ 复位/控制 + A/B 两端单 lane 接口对与
-// 4 lane 接口组 + 全部交叉接线（扰动注 A->B：单 lane 线及 lane0）+
+// 20 lane 接口组 + 全部交叉接线（扰动注 A->B：单 lane 线及 lane0）+
 // 全部 vif 下发。top 仅需本宏与 run_test（见 test/uvm/top.sv）。
 // 各速率取用：10g/25g/5g 走 <a>_serial 单 lane；40g 走 <a>_l[0..3]；
 // 100g（CAUI-10）走 <a>_l[0..9]（20 条 PCS lane 2:1 复用）；
@@ -370,17 +399,17 @@
   `eth_pcs_ctrl_reset(ctrl, rst_n, sys_word_clk) \
   `eth_pcs_port(a, sys_word_clk, sys_bit_clk, rst_n) \
   `eth_pcs_port(b, sys_word_clk, sys_bit_clk, rst_n) \
-  `eth_pcs_mld_lanes(a, 10, sys_bit_clk, rst_n) \
-  `eth_pcs_mld_lanes(b, 10, sys_bit_clk, rst_n) \
+  `eth_pcs_mld_lanes(a, 20, sys_bit_clk, rst_n) \
+  `eth_pcs_mld_lanes(b, 20, sys_bit_clk, rst_n) \
   gmii_if a``_gmii (sys_word_clk, rst_n); \
   gmii_if b``_gmii (sys_word_clk, rst_n); \
-  assign b``_serial.rx_bit = a``_serial.tx_bit ^ ctrl.err_inject; \
+  assign b``_serial.rx_bit = (a``_serial.tx_bit & ~ctrl.los) ^ ctrl.err_inject; \
   assign a``_serial.rx_bit = b``_serial.tx_bit; \
-  `eth_pcs_mld_connect(a, b, 10, ctrl.err_inject) \
+  `eth_pcs_mld_connect(a, b, 20, ctrl.err_inject, ctrl.los, ctrl.los_lane0) \
   `eth_pcs_vifs(a) \
   `eth_pcs_vifs(b) \
-  `eth_pcs_mld_vifs(a, 10) \
-  `eth_pcs_mld_vifs(b, 10) \
+  `eth_pcs_mld_vifs(a, 20) \
+  `eth_pcs_mld_vifs(b, 20) \
   initial begin \
     uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top", \
       {"vif_gmii_", `"a`"}, a``_gmii); \

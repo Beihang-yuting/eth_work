@@ -9,11 +9,14 @@
 //       页周期 3498 tick(339.2ns)。
 //   仲裁层（an73_engine_c）：基页交换 FSM（能力检测 -> 应答检测 ->
 //     完成应答 -> AN 完成）。完成后 is_done() 置位，BFM 切数据模式。
+//     重新协商（restart()）：nonce 碰撞、应答检测中对端页不一致（对端
+//     已重启）时引擎自调；数据模式下链路失效由 BFM 调（IEEE AN_GOOD 下
+//     link_status 失效即回 TRANSMIT_DISABLE）。
 // 依赖：无（纯行为级，BFM 每 bit 时钟调用 tx_tick/rx_tick）。
 // 所有权：BFM 在 an_enable 时持有一个实例；reset() 清状态重新协商。
 // 简化说明（记 TODO）：Next Page 交换未实现（NP=0）；优先级解析只按
-//   本端单能力位（配置哪个速率就 advertise 哪个）；Clause 72 链路训练
-//   未实现（VIP ETH_AN_CL73 流程 AN 后直接进数据模式，与之对齐）。
+//   本端单能力位（配置哪个速率就 advertise 哪个）；无 break_link 静默期；
+//   Clause 72 链路训练在 lt_cl72（cfg.lt_enable，VIP 无 cl72）。
 // -----------------------------------------------------------------------------
 
 // 基页字段布局（IEEE 73.6，D0 先发）：
@@ -195,10 +198,21 @@ class an73_engine_c;
 
   // 观测
   int pages_seen;
+  int restarts;             // 重新协商次数（nonce 碰撞/对端重启/链路失效）
+
+  // COMPLETE_ACKNOWLEDGE 保持页数：进入时正在发的页不完整，须再发满 6 个
+  // 完整 Ack 页（IEEE 73.10.4 要求 6~8 页；VIP svt_err_an73_ack_finished
+  // 检查不足），故按页首计 7 次
+  localparam int ACK_HOLD_PAGES = 7;
+
+  // 一致性比较忽略 Ack（D14）与 Echoed Nonce（D[9:5]）：对端进入应答态
+  // 时两者一起变化
+  localparam logic [47:0] CMP_MASK = ~((48'h1 << 14) | (48'h1f << 5));
 
   protected an73_state_e   state;
   protected an73_page_t    tx_page;
   protected logic [47:0]   last_rx;
+  protected logic [47:0]   ack_ref;     // 触发 ABILITY->ACK 的对端页（掩码后）
   protected int            match_cnt;
   protected int            hold_pages;
 
@@ -209,19 +223,32 @@ class an73_engine_c;
   endfunction
 
   function void reset();
-    state      = AN_ABILITY;
-    match_cnt  = 0;
-    hold_pages = 0;
-    last_rx    = '0;
     pages_seen = 0;
     tx_page          = '0;
     tx_page.selector = 5'b00001;
     tx_page.pause    = pause_cap;
-    tx_page.tx_nonce = nonce;
     tx_page.ability  = ability;
+    restart();
+    restarts = 0;
+  endfunction
+
+  // 重新协商（IEEE TRANSMIT_DISABLE -> ABILITY_DETECT）：清仲裁状态、撤
+  // Ack 与回显 nonce，DME 收发从页首重新开始。BFM 在数据模式链路失效时
+  // 调用（AN_GOOD 下 link_status 失效即重协商）；nonce 碰撞与对端页不
+  // 一致时引擎自调
+  function void restart();
+    state      = AN_ABILITY;
+    match_cnt  = 0;
+    hold_pages = 0;
+    last_rx    = '0;
+    ack_ref    = '0;
+    tx_page.ack          = 1'b0;
+    tx_page.echoed_nonce = '0;
+    tx_page.tx_nonce     = nonce;
     dme_tx.reset();
     dme_rx.reset();
     dme_tx.page = an73_pack(tx_page);
+    restarts++;
   endfunction
 
   function bit is_done();
@@ -241,7 +268,7 @@ class an73_engine_c;
     logic b = dme_tx.tx_tick();
     if (state == AN_COMPLETE && dme_tx.page_start) begin
       hold_pages++;
-      if (hold_pages >= 6) state = AN_DONE;
+      if (hold_pages >= ACK_HOLD_PAGES) state = AN_DONE;
     end
     return b;
   endfunction
@@ -266,16 +293,34 @@ class an73_engine_c;
 
     case (state)
       AN_ABILITY: begin
+        // nonce 碰撞（对端 Transmit Nonce 与本端相同，如环回到自身）：
+        // 换 nonce 重新协商（IEEE nonce_match -> TRANSMIT_DISABLE）。
+        // 与 ability_match 同样只认连续 3 页一致的稳定页（单页解码错不算）
+        if (match_cnt >= 3 && rp.tx_nonce == nonce) begin
+          // 随机换新 nonce（IEEE 为随机数）：固定递增会让同 nonce 的两端
+          // 同步换值、永远碰撞
+          logic [4:0] old = nonce;
+          do nonce = $urandom_range(1, 31); while (nonce == old);
+          restart();
+          return;
+        end
         // 连续 3 页一致且 selector 合法 = 能力检测通过，转应答
         if (match_cnt >= 3 && rp.selector == 5'b00001) begin
           tx_page.echoed_nonce = rp.tx_nonce;
           tx_page.ack          = 1'b1;
           dme_tx.page          = an73_pack(tx_page);
+          ack_ref   = pg & CMP_MASK;
           state     = AN_ACK;
           match_cnt = 0;
         end
       end
       AN_ACK: begin
+        // 对端稳定页内容变了（忽略 Ack/回显 nonce）= 对端已重启协商：本端
+        // 随之重启（IEEE ACKNOWLEDGE_DETECT 的 consistency_match 失败）
+        if (match_cnt >= 3 && (pg & CMP_MASK) != ack_ref) begin
+          restart();
+          return;
+        end
         // 对端也置 Ack 且回显了我方 nonce = 双向确认
         if (rp.ack && rp.echoed_nonce == nonce && match_cnt >= 3) begin
           state      = AN_COMPLETE;

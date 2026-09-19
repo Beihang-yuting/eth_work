@@ -538,6 +538,7 @@ class rs91_rx_c;
   protected int            nseen[4];
   protected int            fl_of[4];       // 物理 lane -> FEC lane（-1 未锁）
   protected logic          q[4][$];        // 按 FEC lane 的对齐后比特
+  protected int            drop_pend[4];   // 去偏斜尚欠丢弃的比特（按 FEC lane）
   protected bit            aligned;
   protected int            cw_in_period;
   protected int            am_miss;
@@ -559,6 +560,7 @@ class rs91_rx_c;
       nseen[p] = 0;
       fl_of[p] = -1;
       q[p].delete();
+      drop_pend[p] = 0;
     end
     aligned      = 0;
     cw_in_period = 0;
@@ -590,6 +592,10 @@ class rs91_rx_c;
 
   function void push_bit(int pl, logic b);
     if (fl_of[pl] >= 0) begin
+      if (drop_pend[fl_of[pl]] > 0) begin
+        drop_pend[fl_of[pl]]--;
+        return;
+      end
       q[fl_of[pl]].push_back(b);
       if (aligned) pump();
       else         try_align();
@@ -616,6 +622,8 @@ class rs91_rx_c;
   // 锁在了更早的某次 AM 上，逐周期丢弃直到差值落在半周期内。前提：真实
   // lane 偏斜小于半个 AM 周期（每 lane 10560bit ≈ 410ns，远大于 802.3
   // 允许的偏斜）—— 更大的偏斜与"锁在相邻一次 AM 上"本质上无法区分
+  // 锁在更早 AM 的 lane 若偏斜又更大，队列可能不足一整周期：不足部分
+  // 记为待丢弃，由后续到达的比特抵扣（否则少丢、该 lane 错位整段不可纠）
   protected function void try_align();
     int mn;
     int period_bits;
@@ -623,9 +631,15 @@ class rs91_rx_c;
     for (int p = 0; p < nfl; p++) if (fl_of[p] < 0) return;
     mn = q[0].size();
     for (int l = 1; l < nfl; l++) if (q[l].size() < mn) mn = q[l].size();
-    for (int l = 0; l < nfl; l++)
-      while (q[l].size() - mn > period_bits / 2)
-        repeat (period_bits) void'(q[l].pop_front());
+    for (int l = 0; l < nfl; l++) begin
+      int drop = 0;
+      while (q[l].size() - drop - mn > period_bits / 2) drop += period_bits;
+      while (drop > 0 && q[l].size() > 0) begin
+        void'(q[l].pop_front());
+        drop--;
+      end
+      drop_pend[l] = drop;
+    end
     aligned      = 1;
     cw_in_period = 0;
     am_miss      = 0;

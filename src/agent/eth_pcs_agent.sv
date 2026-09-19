@@ -57,8 +57,18 @@ class eth_pcs_agent extends uvm_agent;
     if (cfg.cl119 && (cfg.fec_enable || cfg.rs_fec_enable || cfg.an_enable ||
                       cfg.lt_enable || cfg.basex))
       `uvm_fatal("CFG", "200G(cl119) 自带 RS(544,514)，不与其它 FEC/AN/LT/BASE-X 叠加")
+    if (cfg.cl400 && (cfg.num_lanes != 16 ||
+                      (cfg.num_phys != 0 && cfg.num_phys != 16)))
+      `uvm_fatal("CFG", "400G(cl400) 须 num_lanes = 16（num_phys 为 0 或 16）")
+    if (cfg.cl400 && (cfg.fec_enable || cfg.rs_fec_enable || cfg.an_enable ||
+                      cfg.lt_enable || cfg.basex || cfg.xgmii_direct))
+      `uvm_fatal("CFG", "400G(cl400) 自带 RS(544,514)，不与其它 FEC/AN/LT/BASE-X/直驱叠加")
+    if (cfg.cl119 && cfg.cl400)
+      `uvm_fatal("CFG", "cl119 与 cl400 互斥")
     if (cfg.fec_enable && cfg.rs_fec_enable)
       `uvm_fatal("CFG", "fec_enable 与 rs_fec_enable 互斥（不同的码，不叠加）")
+    if (cfg.lane4_start && (cfg.num_lanes > 1 || cfg.basex))
+      `uvm_fatal("CFG", "lane4 起帧仅 Clause 49 单 lane 合法（Clause 82 多 lane / BASE-X 无此起点）")
     if (cfg.rs_fec_enable && cfg.num_lanes > 1 &&
         (cfg.num_lanes != 20 || cfg.num_phys != 4))
       `uvm_fatal("CFG", "多 lane RS-FEC 仅支持 100GBASE-R 形态：num_lanes=20、num_phys=4")

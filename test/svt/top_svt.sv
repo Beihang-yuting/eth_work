@@ -36,11 +36,14 @@ module top_svt;
   // +SPEED=25g/40g 切模式（默认 10g/BASE-KR）。时钟起振前由 initial
   // 设定；test 侧读同一 plusarg 选 VIP cfg
   bit use_25g = 0;
+  bit use_5g  = 0;     // 5GBASE-R（VIP ETH_5G_BASER_SERIAL，5.15625G）
+  bit use_50g = 0;     // 50GBASE-R Mode 1：2 x NRZ PCS/物理 lane（25.78125G）
   bit use_40g = 0;
   bit use_100g = 0;
   bit use_100g4 = 0;
   bit use_100gr = 0;   // 100GBASE-R + RS-FEC（VIP ETH_CSBI_4_LANE，4 × 25.78G）
   bit use_200g = 0;
+  bit use_400g = 0;
   bit use_1g  = 0;
   bit use_2p5g = 0;
 
@@ -48,11 +51,14 @@ module top_svt;
     string speed = "10g";
     void'($value$plusargs("SPEED=%s", speed));
     use_25g = (speed == "25g");
+    use_5g  = (speed == "5g");
+    use_50g = (speed == "50g");
     use_40g = (speed == "40g");
     use_100g = (speed == "100g");
     use_100g4 = (speed == "100g4");
     use_100gr = (speed == "100gr");
     use_200g = (speed == "200g");
+    use_400g = (speed == "400g");
     use_1g  = (speed == "1g");
     use_2p5g = (speed == "2.5g");
   end
@@ -65,6 +71,17 @@ module top_svt;
 
   logic tb_reset = 0;
   logic our_rst_n = 0;
+
+  // Lane clock is used by the reset/bring-up monitor below and by the
+  // multi-lane interface declaration.  Keep the net declaration before any
+  // procedural blocks so VCS resolves it consistently when compiling from a
+  // clean build directory.
+  // ETH_50G_SERIAL physical NRZ lanes are 25.78125G; the VIP's
+  // serial_50g_* clock is a 2x PMA reference used internally by its 4:2
+  // gearbox.  Drive/sample our two PMA lanes at the actual data rate.
+  wire p_lane_clk = use_50g ? v_serial_25g_clk :
+                    (use_100g4 || use_100gr) ? v_serial_25g_clk :
+                    (use_200g || use_400g) ? v_scd_clk : v_serial_baser_clk;
 
 
   initial begin
@@ -84,15 +101,24 @@ module top_svt;
     else if (use_200g)
       // 200G：3.125G 块/s 扣 AM+填充占用（每 16 码字 320 组中 4 组）
       our_word_clk_gen.set_freq(3.125e9 * 316.0 / 320.0);
+    else if (use_400g)
+      // 400G CDMII：64-bit MAC 拍为 6.25GHz；PCS/FEC 开销在 16 条
+      // 26.5625G PMA lane 上由 CDBI/RS(544,514) 吸收。
+      our_word_clk_gen.set_freq(6.25e9);
     else if (use_1g)
       // 1G BASE-X：GMII 字节时钟 = 1.25Gbaud / 10 = 125MHz
       our_word_clk_gen.set_freq(1.25e9 / 10.0);
     else if (use_2p5g)
       // 2.5G BASE-X：GMII 字节时钟 = 3.125Gbaud / 10 = 312.5MHz
       our_word_clk_gen.set_freq(3.125e9 / 10.0);
+    else if (use_50g)
+      // 50GBASE-R 双 lane NRZ：合计字率 = 2 x 25.78125G / 66
+      our_word_clk_gen.set_freq(51.5625e9 / 66.0);
     else
-      // 单 lane；+RSFEC 时每 AM 周期 320 个 257b 组中 1 组让给 AM
-      our_word_clk_gen.set_freq((use_25g ? 25.78125e9 : 10.3125e9) / 66.0 *
+      // 单 lane；+RSFEC 时每 AM 周期 320 个 257b 组中 1 组让给 AM。
+      // 5G 串行位钟由宏按 +SPEED=5g 切到 5.15625GHz（v_serial_baser_clk）
+      our_word_clk_gen.set_freq((use_25g ? 25.78125e9 :
+                                 use_5g  ? 5.15625e9  : 10.3125e9) / 66.0 *
                                 ($test$plusargs("RSFEC") ? 319.0 / 320.0 : 1.0));
     // +100ppm：删除主导域（生产恒盈余，弹性删除只删帧间 idle），
     // 覆盖 fs 舍入与 VIP 位钟的微小速率差
@@ -100,8 +126,9 @@ module top_svt;
     our_word_clk_gen.start();
   end
 
-  // 我方串行位时钟随速率选择（与 VIP 同源信号）
-  wire our_serial_clk = use_25g ? v_serial_25g_clk :
+  // 我方单 lane 串行位时钟随速率选择（50G 多 lane 不使用 p_serial）
+  wire our_serial_clk = use_50g ? v_serial_25g_clk :
+                        use_25g ? v_serial_25g_clk :
                         (use_1g || use_2p5g) ? v_sx_clk : v_serial_baser_clk;
 
   // 复位：VIP 侧一个 gmii 时钟宽度的高脉冲（同示例 reset 序列时序）；
@@ -134,7 +161,8 @@ module top_svt;
   // 集成宏：一行实例化 agent 接口对（p_xgmii / p_serial）
   `eth_pcs_port(p, our_word_clk, our_serial_clk, our_rst_n)
 
-  // 40G 模式的 4 条串行 lane（位钟同 BASE-R 10.3125G；其余模式闲置）
+  // 40G 模式的 4 条串行 lane（位钟同 BASE-R 10.3125G）；
+  // 50G 使用 2 条 25.78125G NRZ lane，和 VIP ETH_50G_SERIAL 对应。
   // 1G BASE-X 的 MAC 侧 GMII 口（其余模式闲置），vif 键 vif_gmii_p
   gmii_if p_gmii (our_word_clk, our_rst_n);
   initial uvm_config_db#(virtual gmii_if)::set(null, "uvm_test_top",
@@ -142,9 +170,38 @@ module top_svt;
 
   // 集成宏：lane 组声明（实例 p_l[i]，vif 键 vif_serial_p_l<i>）
   // 物理 lane 位钟随模式：CAUI-4 为 25.78G，其余多 lane 为 10.3125G
-  wire p_lane_clk = (use_100g4 || use_100gr) ? v_serial_25g_clk :
-                    use_200g  ? v_scd_clk        : v_serial_baser_clk;
-  `eth_pcs_mld_lanes(p, 10, p_lane_clk, our_rst_n)
+  // SVT ETH_50G_SERIAL exposes serial_50g_{tx,rx}_clk at a 2x PMA
+  // reference; its two NRZ data lanes run at 25.78125GHz.  Use the
+  // 25G serial clock for the DUT PMA interfaces above.
+  `eth_pcs_mld_lanes(p, 20, p_lane_clk, our_rst_n)
+
+  // Optional short 400G serial capture for CDBI layout diagnosis.  Captures
+  // VIP TX and our RX at the PMA reference clock without enabling the very
+  // high volume event based lane_dump probe.  Kept behind +CAP400 only.
+  initial begin : cap400_probe
+    integer cfd, ncap;
+    if ($test$plusargs("CAP400") && use_400g) begin
+      cfd = $fopen("cap400.txt", "w");
+      #40ns;
+      ncap = 0;
+      while (ncap < 12000) begin
+        @(posedge p_lane_clk);
+        $fdisplay(cfd, "%0t %016b %016b", $realtime,
+                  mac_ethernet_if.tx_lane[15:0],
+                  {p_l[15].tx_bit,p_l[14].tx_bit,p_l[13].tx_bit,p_l[12].tx_bit,
+                   p_l[11].tx_bit,p_l[10].tx_bit,p_l[9].tx_bit,p_l[8].tx_bit,
+                   p_l[7].tx_bit,p_l[6].tx_bit,p_l[5].tx_bit,p_l[4].tx_bit,
+                   p_l[3].tx_bit,p_l[2].tx_bit,p_l[1].tx_bit,p_l[0].tx_bit});
+        ncap++;
+      end
+      $fclose(cfd);
+      // CAP400 is a finite diagnostic run; terminate once the requested
+      // number of PMA samples is collected so protocol-checker errors cannot
+      // stretch this probe into the normal long SVT timeout.
+      $finish;
+    end
+  end
+
 
   // ---------------- 串行链路交叉连接 ----------------
 
@@ -152,6 +209,13 @@ module top_svt;
   // 单 lane（10G/25G）走 lane bit0；40G 走 [3:0]；100G CAUI-10 走 [9:0]。
   // rx_lane 按模式 mux（不能双驱动，故不复用 connect_svt 宏）
   assign mac_ethernet_if.rx_lane =
+    use_50g ? {'0, p_l[1].tx_bit, p_l[0].tx_bit} :
+    use_400g ? {'0, p_l[15].tx_bit, p_l[14].tx_bit, p_l[13].tx_bit,
+                    p_l[12].tx_bit, p_l[11].tx_bit, p_l[10].tx_bit,
+                    p_l[9].tx_bit, p_l[8].tx_bit, p_l[7].tx_bit,
+                    p_l[6].tx_bit, p_l[5].tx_bit, p_l[4].tx_bit,
+                    p_l[3].tx_bit, p_l[2].tx_bit, p_l[1].tx_bit,
+                    p_l[0].tx_bit} :
     use_200g ? {'0, p_l[7].tx_bit, p_l[6].tx_bit, p_l[5].tx_bit,
                     p_l[4].tx_bit, p_l[3].tx_bit, p_l[2].tx_bit,
                     p_l[1].tx_bit, p_l[0].tx_bit} :
@@ -165,8 +229,8 @@ module top_svt;
   assign p_serial.rx_bit = mac_ethernet_if.tx_lane[0];
 
   // 集成宏：多 lane 接收方向接线 + vif 下发
-  `eth_pcs_mld_rx_wire(p, mac_ethernet_if, 10)
-  `eth_pcs_mld_vifs(p, 10)
+  `eth_pcs_mld_rx_wire(p, mac_ethernet_if, 20)
+  `eth_pcs_mld_vifs(p, 20)
 
   // ---------------- TB 控制（中途复位钩子） ----------------
 

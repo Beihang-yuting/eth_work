@@ -73,13 +73,14 @@ class eth_pcs_driver extends uvm_driver #(eth_frame_txn);
     wait (cfg.vif_xgmii.rst_n === 1'b1);
     @(cfg.vif_xgmii.mac_cb);
 
-    forever begin
+    for (int n = 0; ; n++) begin
       eth_frame_txn t;
       xgmii64_t words[$];
 
       seq_item_port.get_next_item(t);
 
-      eth_frame_to_words(t.data, words);
+      // lane4_start：奇数帧从 lane4 起（交替覆盖两个起点）
+      eth_frame_to_words(t.data, words, cfg.lane4_start && n[0]);
       if (cfg.xgmii_direct) begin
         // 直驱：拍序列绕过引脚，直接进 BFM 的对端驱动队列
         foreach (words[i]) bfm.direct_tx_word(words[i]);

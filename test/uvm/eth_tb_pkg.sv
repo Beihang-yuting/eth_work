@@ -236,11 +236,16 @@ package eth_tb_pkg;
     // TB 控制接口（复位/扰动测试用；普通测试可为 null）
     protected virtual tb_ctrl_if vif_ctrl;
 
-    // MLD lane 数（+SPEED=40g 时为 4，其余 1）
+    // PCS lane 数（40g=4，100g/100g4/100gr=20，200g=8，400g=16，其余 1）与物理 lane 数
     protected int mld_lanes = 1;
     protected int mld_phys  = 1;
     protected bit is_200g   = 0;
+    protected bit is_400g   = 0;
     protected bit is_100gr  = 0;   // 100GBASE-R + Clause 91 RS-FEC（4 FEC lane）
+
+    // RX 引脚帧内见底必须为 0（形态 A 真实 MAC 看到的引脚流不能被插拍
+    // 毁帧）；复位/扰动类测试会在帧中间断链，由子类关闭
+    protected bit strict_pins = 1;
 
     function new(string name, uvm_component parent);
       super.new(name, parent);
@@ -259,11 +264,15 @@ package eth_tb_pkg;
         string speed = "10g";
         void'($value$plusargs("SPEED=%s", speed));
         mld_lanes = (speed == "40g")  ? 4  :
+                    (speed == "50g")  ? 4  :
                     (speed == "200g") ? 8  :
+                    (speed == "400g") ? 16 :
                     (speed == "100g" || speed == "100g4" || speed == "100gr") ? 20 : 1;
         is_200g   = (speed == "200g");
+        is_400g   = (speed == "400g");
         is_100gr  = (speed == "100gr");
-        mld_phys  = (speed == "100g")  ? 10 :             // CAUI-10：2:1 复用
+        mld_phys  = (speed == "50g")  ? 2  :              // 50GBASE-R：4 PCS lane → 2×25.78125G NRZ
+                    (speed == "100g")  ? 10 :             // CAUI-10：2:1 复用
                     (speed == "100g4" || speed == "100gr") ? 4 : mld_lanes;
         // 100g4：CAUI-4 5:1 复用；100gr：20 PCS lane 经 RS-FEC 映射到 4 FEC lane
         // 200g：8 条 PCS lane 各占一条物理 lane（Clause 119，不走 MLD）
@@ -293,6 +302,10 @@ package eth_tb_pkg;
         cfg_b.xgmii_direct = 1;
       end
 
+      // +LANE4：A 端 driver 奇数帧从 lane4 起帧（Clause 49 单 lane 专用，
+      // 覆盖 0x33 块的编码 -> 解码 -> 帧装配）
+      if ($test$plusargs("LANE4")) cfg_a.lane4_start = 1;
+
       // 1g/2.5g：BASE-X（8b/10b，Clause 36），MAC 侧改走 GMII
       begin
         string speed = "10g";
@@ -321,6 +334,21 @@ package eth_tb_pkg;
         cfg_b.rs_fec_enable = 1;
       end
 
+      // BER 监视（hi_ber）：25G 及以上按 IEEE 781250 块窗 / 97 个坏头
+      //（cfg 默认 10GBASE-R 的 19531 / 16）
+      begin
+        string speed = "10g";
+        void'($value$plusargs("SPEED=%s", speed));
+        if (speed == "25g" || speed == "50g" || speed == "40g" || speed == "100g" ||
+            speed == "100g4" || speed == "100gr" || speed == "200g" ||
+            speed == "400g") begin
+          cfg_a.ber_limit = 97;
+          cfg_b.ber_limit = 97;
+          cfg_a.ber_window_blocks = 781250;
+          cfg_b.ber_window_blocks = 781250;
+        end
+      end
+
       // Clause 72 链路训练：+LT 开启（可与 +AN 组合成完整 KR 建链
       // 序列 AN -> LT -> 数据；VIP 不支持 cl72，仅自环用）
       if ($test$plusargs("LT")) begin
@@ -347,10 +375,14 @@ package eth_tb_pkg;
         cfg_b.num_phys   = mld_phys;
         cfg_a.cl119      = is_200g;
         cfg_b.cl119      = is_200g;
+        cfg_a.cl400      = is_400g;
+        cfg_b.cl400      = is_400g;
         // AM 间隔：40G 环回沿用 512；100G 取 64（与 VIP csbi_100g_align_timer
         // 默认一致，交叉/环回同一值；须与 top 字钟扣减的 +AM_SPACING 一致）
-        cfg_a.am_spacing = (mld_lanes == 20) ? 64 : 512;
-        cfg_b.am_spacing = (mld_lanes == 20) ? 64 : 512;
+        cfg_a.am_spacing = is_400g ? 5440 : ((mld_lanes == 20) ? 64 :
+                           ((mld_lanes == 4 && mld_phys == 2) ? 1280 : 512));
+        cfg_b.am_spacing = is_400g ? 5440 : ((mld_lanes == 20) ? 64 :
+                           ((mld_lanes == 4 && mld_phys == 2) ? 1280 : 512));
         // cl74 叠加（fec_mode）按 PCS lane 各一套，40g/100g 均可；与 200g /
         // 100gr 自带 RS-FEC 的冲突由 agent 配置校验拦截
         for (int i = 0; i < mld_phys; i++) begin
@@ -388,11 +420,11 @@ package eth_tb_pkg;
       env = eth_loopback_env::type_id::create("env", this);
     endfunction
 
-    // 等待双向链路锁定 + 解扰自同步裕量（link-up；复位后亦复用）。
-    // AN(cl73) 开启时 rx_locked() 内含"AN 完成"条件，故本流程无需改动
+    // 等待双向链路可用（锁定且非 hi_ber）+ 解扰自同步裕量（link-up；复位
+    // 后亦复用）。AN(cl73) 开启时 rx_locked() 内含"AN 完成"条件
     protected task wait_link_up();
       int waited_us = 0;
-      while (!(env.agent_a.bfm.rx_locked() && env.agent_b.bfm.rx_locked()))
+      while (!(env.agent_a.bfm.rx_link_up() && env.agent_b.bfm.rx_link_up()))
       begin
         #100ns;
         waited_us++;
@@ -448,6 +480,26 @@ package eth_tb_pkg;
         disable fork;
       end join
     endtask
+
+    // 严格段结算：该段 n 帧必须全部匹配、零错配零丢失，否则按失败上报。
+    // 分段测试每个严格段都调用 —— 不能只靠末尾的完成打印或末段计数
+    //（中间段超时只报 1 个 uvm_error，曾被只看汇总行的判据漏过）
+    protected function void check_strict(string seg, int n);
+      if (env.sb.match_count != n || env.sb.mismatch_count != 0 ||
+          env.sb.lost_count != 0)
+        `uvm_error("TEST", $sformatf(
+          "%s 未全净: match=%0d/%0d mismatch=%0d lost=%0d", seg,
+          env.sb.match_count, n, env.sb.mismatch_count, env.sb.lost_count))
+    endfunction
+
+    virtual function void check_phase(uvm_phase phase);
+      super.check_phase(phase);
+      if (strict_pins && (env.agent_a.bfm.rxpin_midframe_underrun != 0 ||
+                          env.agent_b.bfm.rxpin_midframe_underrun != 0))
+        `uvm_error("TEST", $sformatf("RX 引脚帧内见底 A=%0d B=%0d",
+                   env.agent_a.bfm.rxpin_midframe_underrun,
+                   env.agent_b.bfm.rxpin_midframe_underrun))
+    endfunction
 
     // 发流后等记分板收齐或超时。超时按失败处理 —— 挂死型缺陷（失锁、
     // 流水线断流）必须显式暴露而不是靠全局 timeout 掩盖。
@@ -577,6 +629,7 @@ package eth_tb_pkg;
       super.new(name, parent);
       num_frames  = 500;     // 每段 500，全测试合计 1000 帧
       run_timeout = 100ms;
+      strict_pins = 0;       // 复位斩断在途帧
     endfunction
 
     virtual task run_phase(uvm_phase phase);
@@ -588,6 +641,7 @@ package eth_tb_pkg;
       // 段1：正常大流量
       wait_link_up();
       run_traffic(num_frames, run_timeout);
+      check_strict("段1", num_frames);
       `uvm_info("TEST", $sformatf("段1 完成 match=%0d", env.sb.match_count),
                 UVM_LOW)
 
@@ -601,6 +655,7 @@ package eth_tb_pkg;
 
       // 段2：复位后的流量必须完全干净
       run_traffic(num_frames, run_timeout);
+      check_strict("段2(复位后)", num_frames);
       `uvm_info("TEST", $sformatf("段2(复位后) 完成 match=%0d",
                                   env.sb.match_count), UVM_LOW)
 
@@ -626,6 +681,7 @@ package eth_tb_pkg;
       super.new(name, parent);
       num_frames  = 500;
       run_timeout = 100ms;
+      strict_pins = 0;       // 复位斩断在途帧
     endfunction
 
     virtual task run_phase(uvm_phase phase);
@@ -671,8 +727,9 @@ package eth_tb_pkg;
         env.sb.lenient = 0;
         wait_link_up();
 
-        // 复位后严格段：全净才算恢复成功
+        // 复位后严格段：全净才算恢复成功（逐轮判定）
         run_traffic(num_frames, run_timeout);
+        check_strict($sformatf("第 %0d 轮复位后严格段", round + 1), num_frames);
         `uvm_info("TEST", $sformatf("第 %0d 轮复位后严格段 完成 match=%0d",
                                     round + 1, env.sb.match_count), UVM_LOW)
 
@@ -690,20 +747,36 @@ package eth_tb_pkg;
 
   // ---------------- 链路扰动（反压）恢复测试 ----------------
 
-  // 段1 大流量进行中注入串行线误码窗口（等效链路反压/瞬断）：
+  // 段1 大流量进行中注入串行线扰动（等效链路误码 + 瞬断）：
   // 宽松比对 —— 允许扰动毁帧，不允许凭空出帧；撤扰后段2 严格
   // 零丢零错 —— 验证失锁重锁与流量恢复，无卡死。
+  // 扰动分两段：先整位翻转（误码：FEC/MLD/BASE-X 因码字/AM/码组非法
+  // 而受损），再线路断开（全 0：64b/66b 同步头非法，各模式必失锁）——
+  // 仅翻转对 64b/66b 同步头仍合法（01<->10），BASE-R 不会失锁
   class eth_disturb_recovery_test extends eth_loopback_test;
 
     `uvm_component_utils(eth_disturb_recovery_test)
 
-    // 扰动窗口时长（覆盖多个 66b 块与锁定窗口，足以造成失锁）
+    // 扰动窗口时长（翻转 + 断线各占一半，覆盖多个码字与锁定窗口）
     protected time disturb_len = 20us;
 
     function new(string name, uvm_component parent);
+      int us;
       super.new(name, parent);
       num_frames  = 500;     // 每段 500，全测试合计 1000 帧
       run_timeout = 100ms;
+      strict_pins = 0;       // 扰动/断线斩断在途帧
+      // +DISTURB_US=<n>：加长扰动窗（AN 模式下断线超过 an_link_fail_inhibit
+      // 即触发链路失效重协商，覆盖 AN_GOOD -> 重新协商 -> 恢复）
+      if ($value$plusargs("DISTURB_US=%d", us) && us > 0) disturb_len = us * 1us;
+    endfunction
+
+    virtual function void report_phase(uvm_phase phase);
+      super.report_phase(phase);
+      if (env.agent_a.cfg.an_enable)
+        `uvm_info("TEST", $sformatf("AN 重协商 A=%0d B=%0d",
+                  env.agent_a.bfm.an_restarts(), env.agent_b.bfm.an_restarts()),
+                  UVM_LOW)
     endfunction
 
     virtual task run_phase(uvm_phase phase);
@@ -726,9 +799,12 @@ package eth_tb_pkg;
           // 等流量跑起来再扰动，确保扰动落在帧中间
           wait (env.sb.match_count > 10);
           vif_ctrl.err_inject = 1;
-          #disturb_len;
+          #(disturb_len / 2);
           vif_ctrl.err_inject = 0;
-          `uvm_info("TEST", "扰动窗口结束", UVM_LOW)
+          vif_ctrl.los        = 1;
+          #(disturb_len / 2);
+          vif_ctrl.los        = 0;
+          `uvm_info("TEST", "扰动窗口结束（翻转 + 断线）", UVM_LOW)
         end
       join
 
@@ -755,8 +831,150 @@ package eth_tb_pkg;
 
       // 段2：恢复后的流量必须完全干净
       run_traffic(num_frames, run_timeout);
+      check_strict("段2(恢复后)", num_frames);
       `uvm_info("TEST", $sformatf("段2(恢复后) 完成 match=%0d",
                                   env.sb.match_count), UVM_LOW)
+
+      phase.drop_objection(this);
+    endtask
+
+  endclass
+
+  // ---------------- 链路故障信令测试（Local Fault / hi_ber） ----------------
+
+  // RX 链路未起时 MAC 侧（B 端 XGMII RX 引脚）必须持续为 Local Fault：
+  //   ① 上电建链前；② 断线（多 lane 另测仅 lane0 断线：单 lane 失锁即整体
+  //   失去对齐）；③ hi_ber：A->B 稀疏单 bit 误码使坏同步头超限而块锁不丢，
+  //   hi_ber 期间驱 LF，撤扰后一个干净窗口清除。前后各一个 500 帧严格段。
+  // 仅适用无 FEC 的 BASE-R：本测试要的是"块锁保持、同步头坏"这一机制；
+  // 同样误码密度下 cl74 码字不可纠会失锁（UNLOCK_BAD），RS-FEC/cl119 则把
+  // 不可纠码字的块同步头标坏 —— 机制不同，不在本测试范围。BER 窗口统一取
+  // 10G 值（19531 块 / 16 个）：25G+ 的 IEEE 窗口 781250 块，清除一次要数
+  // ms 仿真时间，本测试只验证机制
+  class eth_link_fault_test extends eth_loopback_test;
+
+    `uvm_component_utils(eth_link_fault_test)
+
+    // 稀疏误码间隔（位钟拍）：约 3 块一次，64 块内坏头期望 < 1（远低于
+    // 失锁门限 16）；一个 BER 窗口内坏头 10G 约 200、40G（只翻 lane0，窗口
+    // 按全部 lane 计块）约 49，均远超 hi_ber 门限 16
+    protected int flip_period_bits = 200;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      num_frames  = 500;
+      run_timeout = 100ms;
+      strict_pins = 0;       // 断线斩断在途帧
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      foreach (cfg_names[i]) begin
+        eth_pcs_cfg c;
+        if (!uvm_config_db#(eth_pcs_cfg)::get(this, "env", cfg_names[i], c))
+          `uvm_fatal("CFG", "未取得 agent 配置")
+        if (c.fec_enable || c.rs_fec_enable || c.cl119 || c.cl400 || c.basex ||
+            c.xgmii_direct || c.an_enable || c.lt_enable)
+          `uvm_fatal("CFG", "link_fault 仅适用无 FEC 的 BASE-R 模式")
+        c.ber_limit         = 16;
+        c.ber_window_blocks = 19531;
+      end
+    endfunction
+
+    protected string cfg_names[2] = '{"cfg_a", "cfg_b"};
+
+    // B 端 XGMII RX 引脚当前是否为 Local Fault（多 lane 为 Clause 82 格式）
+    protected function bit pins_lf();
+      xgmii64_t lf = xgmii_local_fault(env.agent_b.cfg.num_lanes > 1);
+      return env.agent_b.cfg.vif_xgmii.rxc === lf.ctl &&
+             env.agent_b.cfg.vif_xgmii.rxd === lf.data;
+    endfunction
+
+    // dur 内每 50ns 采样 B 端：链路连续两次采样未起（引脚已跟上）时必须
+    // 为 LF。until_up=1 时链路一起即结束。须至少采到 1 次且全为 LF
+    protected task sample_lf(string what, time dur, bit until_up = 0);
+      int n_down = 0, n_bad = 0;
+      bit prev_down = 0;
+      for (time t = 0; t < dur; t += 50ns) begin
+        bit down = !env.agent_b.bfm.rx_link_up();
+        if (until_up && !down) break;
+        if (down && prev_down) begin
+          n_down++;
+          if (!pins_lf()) n_bad++;
+        end
+        prev_down = down;
+        #50ns;
+      end
+      if (n_down == 0 || n_bad != 0)
+        `uvm_error("TEST", $sformatf(
+          "%s: 链路未起采样 %0d 次，其中引脚非 Local Fault %0d 次（期望 >0 / 0）",
+          what, n_down, n_bad))
+      else
+        `uvm_info("TEST", $sformatf("%s: 链路未起采样 %0d 次，引脚全为 Local Fault",
+                  what, n_down), UVM_LOW)
+    endtask
+
+    virtual task run_phase(uvm_phase phase);
+      virtual serial_if vs;
+      bit stop_flip = 0;
+
+      phase.raise_objection(this);
+      if (vif_ctrl == null)
+        `uvm_fatal("TEST", "链路故障测试需要 top 提供 tb_ctrl_if")
+      vs = (env.agent_b.cfg.num_lanes > 1) ? env.agent_b.cfg.vif_serial_lanes[0]
+                                           : env.agent_b.cfg.vif_serial;
+
+      // ① 上电建链前
+      sample_lf("建链前", 1ms, 1);
+      wait_link_up();
+      run_traffic(num_frames, run_timeout);
+      check_strict("段1", num_frames);
+      env.sb.clear();
+
+      // ② 断线：全部 lane；多 lane 另测仅 lane0
+      vif_ctrl.los = 1;
+      sample_lf("断线", 5us);
+      vif_ctrl.los = 0;
+      wait_link_up();
+      if (env.agent_b.cfg.num_lanes > 1) begin
+        vif_ctrl.los_lane0 = 1;
+        sample_lf("仅 lane0 断线", 5us);
+        vif_ctrl.los_lane0 = 0;
+        wait_link_up();
+      end
+
+      // ③ hi_ber：每 flip_period_bits 个位钟翻转 1 bit（多 lane 注在 lane0）
+      fork
+        while (!stop_flip) begin
+          repeat (flip_period_bits - 1) @(vs.rx_cb);
+          vif_ctrl.err_inject = 1;
+          @(vs.rx_cb);
+          vif_ctrl.err_inject = 0;
+        end
+      join_none
+      fork begin
+        fork
+          while (!env.agent_b.bfm.is_hi_ber()) #100ns;
+          begin
+            #1ms;
+            `uvm_error("TEST", "稀疏误码 1ms 内 hi_ber 未置位")
+          end
+        join_any
+        disable fork;
+      end join
+      if (!env.agent_b.bfm.rx_locked())
+        `uvm_error("TEST", "hi_ber 阶段块锁丢失（应只触发 hi_ber）")
+      sample_lf("hi_ber", 2us);
+      stop_flip = 1;
+      wait (vif_ctrl.err_inject == 0);
+      wait_link_up();          // hi_ber 需一个干净的完整窗口才清除
+
+      // 故障期间无流量，记分板不应有任何帧；恢复后严格段
+      check_strict("故障段（无流量）", 0);
+      run_traffic(num_frames, run_timeout);
+      check_strict("段2(故障恢复后)", num_frames);
+      `uvm_info("TEST", $sformatf("链路故障信令覆盖完成 hi_ber=%0d",
+                env.agent_b.bfm.get_hi_ber_count()), UVM_LOW)
 
       phase.drop_objection(this);
     endtask

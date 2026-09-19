@@ -41,11 +41,15 @@ endfunction
 // 拍边界的 IDLE；不含额外 IPG 拍（由 BFM 空闲时自然生成）。
 // 边界条件：frame 为空时仍产生合法的 preamble+FCS 空帧（调用方通常不会
 // 这么用，但保证输出永远是合法码流）。
+// lane4=1：首拍 lane0~3 为 IDLE、S 落 lane4（Clause 49 的另一合法起点，
+// 32bit XGMII 内核的 MAC 常见；编码为 0x33 块）。Clause 82 无此起点
 function automatic void eth_frame_to_words(byte unsigned frame[$],
-                                           ref xgmii64_t words[$]);
+                                           ref xgmii64_t words[$],
+                                           input bit lane4 = 0);
   byte unsigned line_bytes[$];
   logic [31:0]  fcs;
   int           total;
+  int           first_n = lane4 ? 3 : 7;   // 首拍承载的线路字节数
 
   // 线路字节序列：S 由第一拍单独处理，此处从 preamble 第 2 字节起
   for (int i = 0; i < 6; i++) line_bytes.push_back(ETH_PREAMBLE);
@@ -55,19 +59,22 @@ function automatic void eth_frame_to_words(byte unsigned frame[$],
   fcs = eth_crc32(frame);
   for (int i = 0; i < 4; i++) line_bytes.push_back(fcs[i*8 +: 8]);
 
-  // 第一拍：S + 前 7 个线路字节
+  // 第一拍：S + 前 7 个线路字节（lane4 起始：4×IDLE + S + 前 3 个）
   begin
-    xgmii64_t w;
-    w.ctl = 8'h01;
-    w.data[7:0] = XGMII_START;
-    for (int i = 0; i < 7; i++) w.data[8 + i*8 +: 8] = line_bytes[i];
+    xgmii64_t w = xgmii_all_idle();
+    w.ctl[8 - first_n - 1] = 1'b1;
+    w.data[(7 - first_n)*8 +: 8] = XGMII_START;
+    for (int i = 0; i < first_n; i++) begin
+      w.ctl[8 - first_n + i]  = 1'b0;
+      w.data[(8 - first_n + i)*8 +: 8] = line_bytes[i];
+    end
     words.push_back(w);
   end
 
   // 后续拍：8 字节一组，尾拍放 T 并补 IDLE
   total = line_bytes.size();
   begin
-    int pos = 7;
+    int pos = first_n;
     while (pos < total) begin
       xgmii64_t w = xgmii_all_idle();
       int lane = 0;

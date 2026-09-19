@@ -10,8 +10,9 @@
 // 依赖：svt_ethernet_uvm_pkg（VIP）、eth_pcs_pkg（自研 agent）、
 //       eth_tb_pkg（复用 net_packet 发包序列）。
 // 所有权：UVM 组件树。VIP 接口经 config_db "if_port" 由 top 注入。
-// 说明：本阶段 FEC 关闭 —— 我方 Clause 74 PN-2112 采用每码字重启的简化
-//       种子约定，与 VIP 实现不保证互通；FEC 互通对接单独跟进。
+  // 说明：+SPEED 选 VIP 接口模式（10g/25g/5g/50g/40g/100g/100g4/100gr/200g/1g/
+//       2.5g/an73），+FEC/+RSFEC 叠加 FEC（set_fec_overlay），+LANE4 我方
+//       lane4 起帧。各模式码流格式均由 VIP 实抓码流标定。
 // -----------------------------------------------------------------------------
 
 package eth_svt_cross_pkg;
@@ -68,14 +69,33 @@ package eth_svt_cross_pkg;
       enable_all_vip_components();
     endfunction
 
-    // 40G 4 lane 串行（BASE-KR4，tx_lane[3:0]，MLD/AM 按标准 16384）
+    // 5GBASE-R 单 lane 串行（Clause 49 PCS 降速到 5.15625G，tx_lane[0]）；
+    // 时钟由宏按 +SPEED=5g 切换（XGMII 78.125M / 串行 5.15625G / XSBI=位钟/16）
+    function void set_5g_cfg();
+      interface_select = ETH_5G_BASER_SERIAL;
+      enable_all_vip_components();
+    endfunction
+
+    // 50GBASE-R 双 NRZ lane（VIP ETH_50G_SERIAL，2 x 25.78125G）。
+    // 这是 50G Mode 1 的 PCS lane 形式；每 lane 使用 66b AM/去偏斜。
+    function void set_50g_cfg();
+      interface_select = ETH_50G_SERIAL;
+      // VIP 默认 1280 个 66b 块一个 AM；与 DUT 的 MLD 配置一致。
+      lsbi_50g_align_timer = 1280;
+      enable_all_vip_components();
+    endfunction
+
     // Clause 73 自协商：VIP 独立接口模式，AN 完成（HCD=10G BASE-R）后
     // 自动切入 10G 串行数据模式（tx_lane[0]，同 XSBI 通路）
+    // internal_restart：VIP 在 AN_GOOD 下发现 PHY 链路失效（我方复位后改发
+    // DME）即自行重新协商 —— 默认关时我方复位后 VIP 永远停在 AN_GOOD 等
+    // 数据，两端僵持（交叉复位必需；正常建链无影响）
     function void set_an73_cfg();
       interface_select = ETH_AN_CL73;
       enable_an73_hcd  = ENABLE_AN73_HCD_10G_BASER;
       enable_fec       = 2'h0;
       enable_an73_reneg = 0;
+      enable_an73_internal_restart = 1;
       enable_all_vip_components();
     endfunction
 
@@ -118,6 +138,14 @@ package eth_svt_cross_pkg;
       enable_all_vip_components();
     endfunction
 
+    // 400GBASE-R CDBI serial: 16 NRZ lanes, four interleaved
+    // RS(544,514) codewords per alignment period.
+    function void set_400g_cfg();
+      interface_select = ETH_400G_SERIAL;
+      cdbi_rs_fec_mode_align_timer = 16;
+      enable_all_vip_components();
+    endfunction
+
     // 100GBASE-R + RS-FEC（Clause 91）4 lane 串行：VIP 以 CSBI_4_LANE +
     // enable_rs_fec + 1bit 宽度呈现（agent cfg 把它归为 4 条串行 lane）
     function void set_100gr_cfg();
@@ -139,6 +167,7 @@ package eth_svt_cross_pkg;
       end
     endfunction
 
+    // 40G 4 lane 串行（BASE-KR4，tx_lane[3:0]，MLD；AM 间隔见下）
     function void set_40g_cfg();
       interface_select = ETH_XLSBI_SERIAL;
       // AM 间隔与我方 BFM 统一为 64（VIP 默认值，合理约束仅 {64,128,256}；
@@ -320,6 +349,28 @@ package eth_svt_cross_pkg;
 
   endclass
 
+  // ---------------- AN73 链路事务回调 ----------------
+
+  // VIP driver 每次起 AN 时经此回调取链路事务（VIP 示例同法）。只放宽
+  // link_fail_inhibit：VIP 默认 5050 个 100ps 参考钟（505ns），短于我方
+  // 逐 bit slip 搜索 + 64 块锁定（约 1.3us）与两端切数据模式的时间差，
+  // AN_GOOD_CHECK 会先超时回 TRANSMIT_DISABLE；放宽到 10us。其余字段取
+  // 类默认值（10GBASE-KR 能力），nonce 取 9（与我方 5 不同）
+  class an73_link_cb extends svt_ethernet_txrx_callback;
+
+    svt_ethernet_link_transaction link_trans;
+
+    function new(string name = "an73_link_cb");
+      super.new();
+    endfunction
+
+    virtual task svt_ethernet_txrx_link_transaction(svt_ethernet_txrx driver,
+                                                    ref svt_ethernet_link_transaction xact);
+      xact = link_trans;
+    endtask
+
+  endclass
+
   // ---------------- 对接 env ----------------
 
   class cross_env extends uvm_env;
@@ -362,6 +413,16 @@ package eth_svt_cross_pkg;
 
       phy_agent.drv.tx_ap.connect(sb.our_tx_imp);
       phy_agent.mon.rx_ap.connect(sb.our_rx_imp);
+
+      if (vip_cfg.interface_select == ETH_AN_CL73) begin
+        an73_link_cb cb = new();
+        cb.link_trans = new();
+        cb.link_trans.cfg = vip_cfg;
+        cb.link_trans.an73_link_fail_inhibit_timer = 100000;   // 10us
+        cb.link_trans.an73_transmit_nonce_field    = 5'd9;
+        uvm_callbacks#(svt_ethernet_txrx, svt_ethernet_txrx_callback)::add(
+          vip_mac.driver, cb);
+      end
     endfunction
 
   endclass
@@ -382,10 +443,25 @@ package eth_svt_cross_pkg;
     protected bit is_100g  = 0;
     protected bit is_caui4 = 0;
     protected bit is_200g  = 0;
+    protected bit is_400g  = 0;
+    protected bit is_50g   = 0;
     protected bit is_100gr = 0;   // 100GBASE-R + Clause 91 RS-FEC（4 FEC lane）
 
     // 1G BASE-X 模式标志：我方 agent 走 GMII + 8b/10b
     protected bit basex_mode = 0;
+
+    // Clause 73 AN 模式（+SPEED=an73）：双方先协商（HCD=10GBASE-KR）再进数据
+    protected bit an_mode = 0;
+
+    // 我方 RX 引脚帧内见底必须为 0（交叉复位测试会斩断在途帧，由其关闭）
+    protected bit strict_pins = 1;
+
+    virtual function void check_phase(uvm_phase phase);
+      super.check_phase(phase);
+      if (strict_pins && env.phy_agent.bfm.rxpin_midframe_underrun != 0)
+        `uvm_error("TEST", $sformatf("RX 引脚帧内见底 %0d 次",
+                   env.phy_agent.bfm.rxpin_midframe_underrun))
+    endfunction
 
     function new(string name, uvm_component parent);
       super.new(name, parent);
@@ -396,6 +472,7 @@ package eth_svt_cross_pkg;
       eth_pcs_cfg   phy_cfg;
       virtual xgmii_if  vx;
       virtual serial_if vs;
+      string speed = "10g";
 
       super.build_phase(phase);
 
@@ -407,10 +484,11 @@ package eth_svt_cross_pkg;
 
       // +SPEED=25g 切 25G 串行模式（与 top_svt 的时钟选择同一 plusarg）
       begin
-        string speed = "10g";
         void'($value$plusargs("SPEED=%s", speed));
         case (speed)
           "25g":   vip_cfg.set_25g_cfg();
+          "5g":    vip_cfg.set_5g_cfg();
+          "50g":   vip_cfg.set_50g_cfg();
           "40g":   vip_cfg.set_40g_cfg();
           "an73":  vip_cfg.set_an73_cfg();
           "1g":    vip_cfg.set_1g_cfg();
@@ -418,17 +496,23 @@ package eth_svt_cross_pkg;
           "100g":  vip_cfg.set_100g_cfg();
           "100g4": vip_cfg.set_100g4_cfg();
           "200g":  vip_cfg.set_200g_cfg();
+          "400g":  vip_cfg.set_400g_cfg();
           "100gr": vip_cfg.set_100gr_cfg();
           default: vip_cfg.set_kr_cfg();
         endcase
         vip_cfg.set_fec_overlay($test$plusargs("FEC"), $test$plusargs("RSFEC"));
-        mld_mode   = (speed == "40g" || speed == "100g" || speed == "100g4" ||
-                      speed == "100gr" || speed == "200g");
+        // ETH_50G_SERIAL is the two-PMA-lane variant: four PCS lanes use
+        // the same MLD/deskew path as 40G, with a 1280-block AM interval.
+        mld_mode   = (speed == "40g" || speed == "50g" || speed == "100g" || speed == "100g4" ||
+                      speed == "100gr" || speed == "200g" || speed == "400g");
         is_200g    = (speed == "200g");
+        is_400g    = (speed == "400g");
+        is_50g     = (speed == "50g");
         is_100gr   = (speed == "100gr");
         is_100g    = (speed == "100g" || speed == "100g4");
         is_caui4   = (speed == "100g4");
         basex_mode = (speed == "1g" || speed == "2.5g");
+        an_mode    = (speed == "an73");
       end
 
       vip_cfg.mac_address[0] = 48'h000000004455;
@@ -440,6 +524,16 @@ package eth_svt_cross_pkg;
       phy_cfg.rs_fec_enable = $test$plusargs("RSFEC") || is_100gr;
       phy_cfg.vif_xgmii  = vx;
       phy_cfg.vif_serial = vs;
+      // +LANE4：我方奇数帧从 lane4 起帧（0x33 块，由 VIP 接收检查）
+      phy_cfg.lane4_start = $test$plusargs("LANE4");
+      // AN：我方 advertise 10GBASE-KR（A2），nonce 5（VIP 取 9，见 an73_link_cb）
+      phy_cfg.an_enable = an_mode;
+      // BER 监视：25G 及以上按 IEEE 781250 块窗 / 97 个（cfg 默认 10G 值）
+      if (mld_mode || $test$plusargs("SPEED=25g") ||
+          $test$plusargs("SPEED=50g")) begin
+        phy_cfg.ber_limit         = 97;
+        phy_cfg.ber_window_blocks = 781250;
+      end
 
       // 1G BASE-X：MAC 侧改走 GMII
       if (basex_mode) begin
@@ -454,12 +548,15 @@ package eth_svt_cross_pkg;
       // 100G CAUI-10：20 条 PCS lane 以 2:1 bit 复用上 10 条物理 lane
       if (mld_mode) begin
         int nphys;
-        phy_cfg.num_lanes  = is_200g ? 8 : ((is_100g || is_100gr) ? 20 : 4);
-        phy_cfg.num_phys   = is_200g ? 8 : ((is_caui4 || is_100gr) ? 4 :
-                                            (is_100g ? 10 : 0));
+        phy_cfg.num_lanes  = is_400g ? 16 : (is_200g ? 8 : ((is_100g || is_100gr) ? 20 : 4));
+        phy_cfg.num_phys   = is_400g ? 16 : (is_200g ? 8 : ((is_caui4 || is_100gr) ? 4 :
+                                            (is_100g ? 10 :
+                                             (is_50g ? 2 : 0))));
         phy_cfg.cl119      = is_200g;
-        phy_cfg.am_spacing = 64;
-        nphys = is_200g ? 8 : ((is_100g && !is_caui4) ? 10 : 4);
+        phy_cfg.cl400      = is_400g;
+        phy_cfg.am_spacing = is_400g ? 5440 : (is_50g ? 1280 : 64);
+        nphys = is_400g ? 16 : (is_200g ? 8 : ((is_100g && !is_caui4) ? 10 :
+                                                (is_50g ? 2 : 4)));
         for (int i = 0; i < nphys; i++)
           if (!uvm_config_db#(virtual serial_if)::get(this, "",
                 $sformatf("vif_serial_p_l%0d", i),
@@ -479,7 +576,7 @@ package eth_svt_cross_pkg;
     //（等价挂死），且现场数据直接指向失锁原因
     protected task wait_lock();
       int waited_us = 0;
-      while (!env.phy_agent.bfm.rx_locked()) begin
+      while (!env.phy_agent.bfm.rx_link_up()) begin
         #20us;
         waited_us += 20;
         `uvm_info("TEST", $sformatf(
@@ -491,6 +588,35 @@ package eth_svt_cross_pkg;
           `uvm_fatal("TEST", "等锁超时 —— 对端码流不兼容或未起流")
       end
       #5us;
+    endtask
+
+    // AN 模式：等 VIP 仲裁机进入 AN_GOOD（其 PCS 已锁定我方数据码流）；
+    // 我方 wait_lock 只代表我方 AN 完成 + 锁定，VIP 未就绪时我方发的帧会丢
+    protected task wait_vip_an_good();
+      int waited_us = 0;
+      while (env.vip_mac.monitor.status_tx.an73_arbitration_state !=
+             svt_ethernet_status::AN_GOOD_CHECK_TO_AN_GOOD_ON_LINK_OK) begin
+        #1us;
+        if (++waited_us >= 500)
+          `uvm_fatal("TEST", $sformatf("VIP AN 500us 未进入 AN_GOOD（%s），我方 %s",
+            env.vip_mac.monitor.status_tx.an73_arbitration_state.name(),
+            env.phy_agent.bfm.an_state()))
+      end
+      `uvm_info("TEST", $sformatf("AN 双方完成: VIP AN_GOOD，我方 %s（%0d 页，重协商 %0d 次）",
+                env.phy_agent.bfm.an_state(), env.phy_agent.bfm.an_pages(),
+                env.phy_agent.bfm.an_restarts()), UVM_LOW)
+    endtask
+
+    // 我方复位后：VIP 须先离开 AN_GOOD（internal_restart 重新协商），否则
+    // 后续 wait_vip_an_good 会拿复位前的旧状态误判通过
+    protected task wait_vip_left_an_good();
+      int waited_us = 0;
+      while (env.vip_mac.monitor.status_tx.an73_arbitration_state ==
+             svt_ethernet_status::AN_GOOD_CHECK_TO_AN_GOOD_ON_LINK_OK) begin
+        #100ns;
+        if (++waited_us >= 1000)
+          `uvm_fatal("TEST", "我方复位 100us 后 VIP 仍停在 AN_GOOD（未重新协商）")
+      end
     endtask
 
     // 一段双向流量：A 向 na 帧 + B 向 nb 帧并发，等计数收齐（相对当前
@@ -506,9 +632,12 @@ package eth_svt_cross_pkg;
         seq_b.start(env.phy_agent.sqr);
       join
 
+      // 四个计数都等齐：AN 模式下 VIP TX monitor 报帧晚于我方 RX 收到
+      //（实测段末差 2 帧），只等接收侧会让逐段核对抢跑误报
       fork begin
         fork
-          wait (env.sb.our_rx_count >= na && env.sb.vip_rx_count >= nb);
+          wait (env.sb.our_rx_count >= na && env.sb.vip_rx_count >= nb &&
+                env.sb.vip_tx_count >= na && env.sb.our_tx_count >= nb);
           forever begin
             #10us;
             `uvm_info("TEST", $sformatf(
@@ -538,6 +667,7 @@ package eth_svt_cross_pkg;
 
       phase.raise_objection(this);
       wait_lock();
+      if (an_mode) wait_vip_an_good();
       run_traffic(na, nb);
 
       env.sb.draining = 1;
@@ -566,7 +696,12 @@ package eth_svt_cross_pkg;
     endfunction
 
     virtual function void build_phase(uvm_phase phase);
+      eth_pcs_cfg c;
       super.build_phase(phase);
+      // 基类在 +SPEED=an73 下会开我方 AN；探针要 VIP 持续发能力页，
+      // 我方须保持不协商（env 在本函数返回后才构建，此处改 cfg 生效）
+      if (uvm_config_db#(eth_pcs_cfg)::get(this, "env", "phy_cfg", c))
+        c.an_enable = 0;
       dem = vip_err_window_demoter::type_id::create("dem");
       dem.active = 1;
       uvm_report_cb::add(null, dem);
@@ -654,6 +789,7 @@ package eth_svt_cross_pkg;
 
     function new(string name, uvm_component parent);
       super.new(name, parent);
+      strict_pins = 0;       // 复位斩断在途帧
     endfunction
 
     virtual function void build_phase(uvm_phase phase);
@@ -671,6 +807,7 @@ package eth_svt_cross_pkg;
 
       phase.raise_objection(this);
       wait_lock();
+      if (an_mode) wait_vip_an_good();
 
       for (int round = 0; round <= RESET_ROUNDS; round++) begin
         run_traffic(na, nb);
@@ -681,6 +818,14 @@ package eth_svt_cross_pkg;
         if (env.sb.our_rx_bad != 0)
           `uvm_error("TEST", $sformatf("第 %0d 段方向A 脏帧 %0d",
                                        round, env.sb.our_rx_bad))
+        // 逐段计数核对（多收少收都算错）：中间段超时只报 1 个错，不能靠
+        // 末段计数行与无条件打印的完成行判通过
+        if (env.sb.vip_tx_count != na || env.sb.our_rx_count != na ||
+            env.sb.our_tx_count != nb || env.sb.vip_rx_count != nb)
+          `uvm_error("TEST", $sformatf(
+            "第 %0d 段计数不符: A vip_tx=%0d our_rx=%0d | B our_tx=%0d vip_rx=%0d（期望 %0d/%0d）",
+            round, env.sb.vip_tx_count, env.sb.our_rx_count,
+            env.sb.our_tx_count, env.sb.vip_rx_count, na, nb))
         if (round == RESET_ROUNDS) break;
 
         // 复位窗开：对端预期报错降级 + 我方计分暂停
@@ -689,8 +834,11 @@ package eth_svt_cross_pkg;
 
         ctrl.reset_req = 1;
         wait (!ctrl.reset_req);   // top 完成复位脉冲的握手
+        // AN：我方复位即回 AN 发 DME，VIP 须离开 AN_GOOD 重新协商
+        if (an_mode) wait_vip_left_an_good();
         wait_lock();              // 我方重锁 VIP 码流（多 lane 含同周期
                                   // 锚定收敛，见 mld_rx 去偏斜注释）
+        if (an_mode) wait_vip_an_good();
         #20us;                    // VIP 端重对齐我方新码流裕量
 
         // 复位窗关：清段计数重新计
