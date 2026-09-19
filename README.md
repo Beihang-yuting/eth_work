@@ -66,11 +66,13 @@ make stress_40g multi_reset_40g
   6 列验证，不适用的列标 N/A 并注明原因（10G 线速 RS-FEC、LT/KR 在 VIP 中
   无对应模式；XGMII 直驱无串行线）；所有 UVM 目标另判 `UVM_ERROR`/`UVM_FATAL`
   为 0。见 `docs/verification_matrix.md`。
-- 速率覆盖（环回 + 与 VIP 交叉）：5G/10G/25G 单 lane、40G MLD、100G
-  CAUI-10/CAUI-4、200G Clause 119、1G/2.5G BASE-X。
+- 速率覆盖（环回 + 与 VIP 交叉）：5G/10G/25G 单 lane、40G MLD、50GBASE-R、
+  100G CAUI-10/CAUI-4、200G Clause 119、400G Clause 119 CDBI、1G/2.5G
+  BASE-X。
 - FEC 叠加：Clause 74（10G/25G 单 lane、40G/100G CAUI-10 每 PCS lane）、
   25G RS-FEC（Clause 108）、100G RS-FEC（Clause 91，4 FEC lane）—— 均环回 +
-  VIP 交叉；另有 10G 线速单 lane RS-FEC（非 IEEE 形态，仅环回）。FEC 码流
+  VIP 交叉；200G/400G Clause 119 内置 KP4 RS(544,514)，200G 有环回与 SVT
+  交叉、400G 有 SVT 交叉覆盖；另有 10G 线速单 lane RS-FEC（非 IEEE 形态，仅环回）。FEC 码流
   格式（PN 种子、T 位、转码、AM）全部由 VIP 实抓码流标定，见
   `docs/integration_fec.md`。
 - 64b/66b 块型：单 lane 覆盖 Clause 49 全部块型（含 lane4 起始 0x33/0x66、

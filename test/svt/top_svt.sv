@@ -104,7 +104,12 @@ module top_svt;
     else if (use_400g)
       // 400G CDMII：64-bit MAC 拍为 6.25GHz；PCS/FEC 开销在 16 条
       // 26.5625G PMA lane 上由 CDBI/RS(544,514) 吸收。
-      our_word_clk_gen.set_freq(6.25e9);
+      begin
+        int c400_div = 1;
+        void'($value$plusargs("C400_CLK_DIV=%d", c400_div));
+        if (c400_div < 1) c400_div = 1;
+        our_word_clk_gen.set_freq(6.25e9 / c400_div);
+      end
     else if (use_1g)
       // 1G BASE-X：GMII 字节时钟 = 1.25Gbaud / 10 = 125MHz
       our_word_clk_gen.set_freq(1.25e9 / 10.0);

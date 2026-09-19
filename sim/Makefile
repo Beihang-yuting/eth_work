@@ -49,11 +49,11 @@ SVT_TARGETS = \
   svt_100g_fec svt_100g_fec_reset svt_100g4 svt_100g4_reset \
   svt_100gr svt_100gr_reset svt_200g svt_200g_reset \
   svt_1g svt_1g_reset svt_2p5g svt_2p5g_reset \
-  svt_50g svt_50g_reset
+  svt_50g svt_50g_reset svt_400g svt_400g_reset
 
-# 400G 仍保留为实验性目标：当前 Clause 119 CDBI 映射尚未与 SVT
-# ETH_400G_SERIAL 对齐，普通/复位目标均不得混入默认 all。
-SVT_EXPERIMENTAL_TARGETS = svt_400g svt_400g_reset
+# 400G Clause 119 CDBI 已完成 ETH_400G_SERIAL 普通交叉与交叉复位验证，
+# 因此随正式 SVT_TARGETS 纳入默认 all。保留变量名供外部脚本兼容。
+SVT_EXPERIMENTAL_TARGETS =
 
 .PHONY: all unit clean $(LOOPBACK_TARGETS) $(SVT_TARGETS) $(SVT_EXPERIMENTAL_TARGETS)
 
@@ -863,16 +863,19 @@ svt_50g_reset: svt_simv
 	$(call CHECK_CLEAN,$(BUILD)/svt/run_50g_reset.log)
 
 # 400GBASE-R CDBI 与 VIP（ETH_400G_SERIAL，16 × 26.5625G NRZ）交叉。
-# VIP 两个独立 8-lane PCS 的 CDBI 码字映射仍待标定，故保持实验性目标。
+# +C400_DEFER_FEC 让 AM/去偏斜阶段跳过纯 idle 的 RS 解码，开始发帧前由
+# 测试显式恢复全量 RS(544,514) 检查；+C400_CLK_DIV=100 等比例放慢仿真
+# 时钟，减少无意义的 idle 边沿（协议 bit/word 比例不变）。这两个开关
+# 只影响仿真进程，不改变 DUT/VIP 的逻辑速率或仓库环境变量。
 svt_400g: svt_simv
 	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_test +UVM_MAX_QUIT_COUNT=5 \
-	  +SPEED=400g -l $(BUILD)/svt/run_400g.log
+	  +SPEED=400g +C400_CLK_DIV=100 +C400_DEFER_FEC -l $(BUILD)/svt/run_400g.log
 	grep -q $(SVT_OK) $(BUILD)/svt/run_400g.log
 	$(call CHECK_CLEAN,$(BUILD)/svt/run_400g.log)
 
 svt_400g_reset: svt_simv
 	$(SVT_SIMV) +UVM_TESTNAME=eth_svt_cross_reset_test +UVM_MAX_QUIT_COUNT=5 \
-	  +SPEED=400g -l $(BUILD)/svt/run_400g_reset.log
+	  +SPEED=400g +C400_CLK_DIV=100 +C400_DEFER_FEC -l $(BUILD)/svt/run_400g_reset.log
 	grep -q "CROSS_RESET_RECOVERY_PASS rounds=3" $(BUILD)/svt/run_400g_reset.log
 	grep -q $(SVT_ROK) $(BUILD)/svt/run_400g_reset.log
 	$(call CHECK_CLEAN,$(BUILD)/svt/run_400g_reset.log)

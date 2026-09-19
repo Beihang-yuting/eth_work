@@ -1,19 +1,20 @@
-# 100G / 200G 模式 —— 环境集成与使用说明
+# 100G / 200G / 400G 模式 —— 环境集成与使用说明
 
-适用：eth_pcs_agent 的 100GBASE-R（CAUI-10 / CAUI-4）与 200GBASE-R 多 lane
-模式。可跑示例见 `examples/100g_200g_loopback/`。
+适用：eth_pcs_agent 的 100GBASE-R（CAUI-10 / CAUI-4）、200GBASE-R 和
+400GBASE-R CDBI 多 lane 模式。可跑示例见 `examples/100g_200g_loopback/`。
 
-## 1. 三种模式一览
+## 1. 四种模式一览
 
 | `+SPEED` | 规范 | PCS lane | 物理 lane × 线速 | PMA 复用 | FEC | svt VIP 模式 |
 |---|---|---|---|---|---|---|
 | `100g`  | Clause 82 | 20 | 10 × 10.3125G | 2:1 bit 交织 | 无；`+FEC` 叠加 Clause 74（每 PCS lane） | `ETH_CAUI`（+FEC 时 `enable_fec = 1`） |
 | `100g4` | Clause 82 | 20 | 4 × 25.78125G | 5:1 bit 交织 | 无 | `ETH_CAUI_25X4` |
 | `200g`  | Clause 119 | 8 | 8 × 26.5625G | 1:1 | RS(544,514) 内置 | `ETH_200G_SERIAL` |
+| `400g`  | Clause 119 CDBI | 16 | 16 × 26.5625G | 1:1 | KP4 RS(544,514) 内置 | `ETH_400G_SERIAL` |
 
 100G 与 40G 同属 Clause 82（64b/66b + MLD 轮转分发 + 每 lane AM），只是
-PCS lane 从 4 扩到 20、多了 PMA bit 复用；200G 是另一套结构（Clause 119），
-不走 MLD。
+PCS lane 从 4 扩到 20、多了 PMA bit 复用；200G 和 400G 都采用 Clause 119，
+但 400G 使用 16-lane CDBI 四码字交织布局，不能直接复用 200G 的 8-lane 排布。
 
 ## 2. 使用方式
 
@@ -28,6 +29,8 @@ make loopback_100g4 stress_100g4 multi_reset_100g4 disturb_100g4              # 
 make svt_100g4 svt_100g4_reset
 make loopback_200g stress_200g multi_reset_200g disturb_200g                  # 200G
 make svt_200g svt_200g_reset
+# 400G CDBI（已纳入正式 SVT 目标）
+make svt_400g svt_400g_reset
 ```
 
 判据：各目标 grep 的汇总行，且日志 `UVM_ERROR : 0`、`UVM_FATAL : 0`；
@@ -35,7 +38,8 @@ make svt_200g svt_200g_reset
 （`+SPEED=100gr`，Clause 91）的同类目标 `*_100gr` 见 `integration_fec.md`。
 
 同一个 simv，`+SPEED` 切换；top 用 `eth_pcs_lb_env(a, b)` 即可（宏已含 10
-条物理 lane 组：100G CAUI-10 用满 10 条，CAUI-4 用前 4 条，200G 用前 8 条）。
+条物理 lane 组：100G CAUI-10 用满 10 条，CAUI-4 用前 4 条，200G 用前 8 条；
+400G 交叉由 `top_svt` 的 16 条 CDBI lane 专用接线承载）。
 扰动注入与 40G 相同（`eth_pcs_mld_connect`）：整位翻转只打 A→B 物理
 lane0，断线为 A→B 全部物理 lane。
 
@@ -89,6 +93,40 @@ lane0，断线为 A→B 全部物理 lane。
   `test_cl119(1)` 定向覆盖首 AM 误码下的去偏斜与周期起点 AM 单 bit 误码。
 - VIP 侧 AM 周期 `ccbi_rs_fec_mode_align_timer = 16`（按 RS 码字计）。
 
+### 4.1 400G：CDBI 与 `ETH_400G_SERIAL`
+
+400G 使用 16 条 26.5625G NRZ lane。每个对齐周期包含 4 个 136-symbol
+group（每 lane 共 5440 bit），周期起始为 16 条 lane 各自的 120-bit AM，随后
+为 136 bit 的 PRBS9 填充；每个 group 以 4 个交织的 KP4 RS(544,514) 码字承载，
+一个 AM 周期共 16 个码字。发送
+与接收端都按物理 lane 的 AM 识别逻辑 lane，再按 CDBI 的半周期 codeword
+选择和 8-lane 行索引重组码字；AM、去偏斜和码字重组全部在 RS 纠错前完成。
+VIP 侧配置固定为 `ETH_400G_SERIAL` 与
+`cdbi_rs_fec_mode_align_timer = 16`，对应代码中的 `set_400g_cfg()`。
+
+400G 的行为级空闲建链边沿很多，SVT 目标使用以下仅作用于该进程的开关：
+
+```bash
+export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+export ETH_SVT_DESIGN=/home/ubuntu/ryan/eth_svt_design
+make svt_400g svt_400g_reset
+```
+
+`+C400_CLK_DIV=100` 按比例降低仿真时钟，保持 bit/word 比例不变；
+`+C400_DEFER_FEC` 只在空闲建链期间延迟 RS 解码检查，首段流量前以及每次
+复位后由测试重新打开完整 RS(544,514) 检查，不会放宽帧数据判据。
+
+截至当前 53/VCS 回归，普通交叉已完成 VIP→我方 500 帧、我方→VIP 1000 帧，
+交叉复位已完成 3 轮（每段 100/200 帧）；两者均满足双方计数、
+`invalid_block=0`、`fec_uncorr=0`、`tx_underrun=0` 以及
+`UVM_ERROR : 0`、`UVM_FATAL : 0`。复位窗口内 VIP checker 为恢复链路而产生的
+预期 warning 由测试 demoter 降级，窗口外仍按零错误判定。两个目标当前均在
+正式 `SVT_TARGETS`，会随默认 `make all` 执行。2026-09-19 的 53/VCS 完整回归
+已实际启动两个目标并通过；完整回归日志中的其他目标状态与一次 40G FEC
+初始化停滞重试记录见 `verification_matrix.md` §5。400G 两个目标的本轮
+`PCS_STATS` 分别为 `frames=500` 和 `frames=400`，且 `invalid_block`、
+`fec_uncorr`、`tx_underrun` 均为 0。
+
 ## 5. 失锁、Local Fault 与 hi_ber
 
 - **100G（MLD）同 40G**（见 `integration_40g.md` 第 5 节）：任一 PCS lane
@@ -97,15 +135,15 @@ lane0，断线为 A→B 全部物理 lane。
   Clause 82 AM 锁定状态机的 am_invld_cnt）。
 - **200G**：lane 靠 AM 匹配锁定，没有逐 lane 块同步；周期起点 AM 连续 2 次
   不符即整体重锁（见第 4 节），未对齐期间 RX 引脚为 Local Fault。
-- **Local Fault 与序集格式**：三种模式都按 Clause 82 —— LF 为
+- **Local Fault 与序集格式**：这些模式都按 Clause 82 —— LF 为
   `rxc = 8'h01`、`rxd = 64'h00000000_0100009C`（lane4~7 为 4 个零数据字节）；
   序集拍（0x4B 块）须为 ctl 01 + lane4~7 零数据，且只有 /Q/（0x9C），
   /Fsig/ 与 Clause 49 专有的 lane4 起始/序集块都编码为 ERROR 块、解码判
   非法，`+LANE4` 不可用。
 - **hi_ber**：环回与 VIP 交叉取 781250 块窗 / 97 个坏同步头（IEEE 100G
-  窗口 500us；cfg 默认是 10G 的 19531 / 16）。100G + FEC 与 200G 的块都由
-  FEC 译码重建同步头：+FEC 下 hi_ber 不会触发；200G 只有不可纠码字对
-  （同步头标 2'b11）计入坏头。
+  窗口 500us；cfg 默认是 10G 的 19531 / 16）。100G + FEC、200G 和 400G
+  的块都由 FEC 译码重建同步头：+FEC 下 hi_ber 不会触发；Clause 119 模式
+  只有不可纠码字对（同步头标 2'b11）计入坏头。
 
 ## 6. 顺带发现
 

@@ -186,7 +186,9 @@ third_party/    net_packet（来自 10.11.10.59 ~/workspace/ryan/net_packet）�
    为简化格式（不是 802.3 72.6.10 帧），VIP 不支持 cl72，仅自环验证。
 
 另已完成：200GBASE-R（Clause 119，8 lane，256B/257B + RS(544,514)），
-环回 + VIP 交叉。
+环回 + VIP 交叉；400GBASE-R（Clause 119 CDBI，16 lane，KP4
+RS(544,514)）已完成 SVT 普通交叉与交叉复位，目标清单和判据说明见
+`verification_matrix.md` 与 `integration_100g_200g.md`。
 
 速率族核查备忘：VIP 覆盖 10M~800G 标准速率 + FlexE/USXGMII/MACsec/PTP；
 **80G 不存在**（非 IEEE 标准速率），仅可经 2×40G 聚合或 FlexE 绑定实现。

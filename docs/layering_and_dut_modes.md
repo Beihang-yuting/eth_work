@@ -69,8 +69,8 @@
 | 子层 | 状态 |
 |---|---|
 | MAC Control / MAC / RS | 由 svt VIP 扮演（交叉验证），或由真实 DUT 提供 |
-| PCS | 完整自研：BASE-R 64b/66b（10G/25G/5G 单 lane；40G/100G MLD，100G 含 PMA 2:1/5:1 复用）；200G Clause 119（257b + RS(544,514)）；BASE-X 8b/10b（1G/2.5G，Clause 36，MAC 侧 GMII）。64b/66b 块型：单 lane 按 Clause 49（含 lane4 起始与序集块），多 lane 按 Clause 82（限制见 integration_10g_basekr.md §8）；64b/66b 模式另有 BER 监视（hi_ber），RX 链路未起或 hi_ber 时向 MAC 输出 Local Fault（BASE-X 无此信令） |
-| FEC | Clause 74（10G/25G 单 lane；40G/100G 每 PCS lane 一套）；RS-FEC RS(528,514)：25G Clause 108、100G Clause 91（20 PCS lane → 4 FEC lane）。VIP 交叉覆盖 cl74 10G/25G/40G/100G（CAUI-10）与 RS-FEC 25G/100G，详见 integration_fec.md |
+| PCS | 完整自研：BASE-R 64b/66b（10G/25G/5G 单 lane；40G/100G MLD，100G 含 PMA 2:1/5:1 复用）；200G Clause 119（257b + RS(544,514)）与 400G Clause 119 CDBI（16 lane，257b + KP4 RS(544,514)）；BASE-X 8b/10b（1G/2.5G，Clause 36，MAC 侧 GMII）。64b/66b 块型：单 lane 按 Clause 49（含 lane4 起始与序集块），多 lane 按 Clause 82（限制见 integration_10g_basekr.md §8）；64b/66b 模式另有 BER 监视（hi_ber），RX 链路未起或 hi_ber 时向 MAC 输出 Local Fault（BASE-X 无此信令） |
+| FEC | Clause 74（10G/25G 单 lane；40G/100G 每 PCS lane 一套）；RS-FEC RS(528,514)：25G Clause 108、100G Clause 91（20 PCS lane → 4 FEC lane）；200G/400G Clause 119 内置 KP4 RS(544,514)。VIP 交叉覆盖 cl74 10G/25G/40G/100G（CAUI-10）、RS-FEC 25G/100G，以及 200G/400G Clause 119，详见 integration_fec.md 与 integration_100g_200g.md |
 | PMA | 数字核心行为级（1bit 串化 + 弹性域）；无 gearbox 并口/CDR 建模 |
 | AN/LT | Clause 73 自协商（仅 10G 单 lane，已与 VIP 交叉：`svt_an` / `svt_an_reset`）；Clause 72 链路训练（训练帧为自定简化格式、非 802.3 帧，VIP 不支持 cl72，仅自环验证）；KR 完整建链 AN→LT→数据见 §2.5；Clause 37（BASE-X AN）未做 |
 | PMD | 不建模 |

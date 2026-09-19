@@ -5,7 +5,7 @@
 
 ```bash
 cd sim
-make -k all      # unit + LOOPBACK_TARGETS（87）+ SVT_TARGETS（33）
+make -k all      # unit + LOOPBACK_TARGETS（87）+ SVT_TARGETS（37）
 ```
 
 ## 1. 各列含义与判据
@@ -52,7 +52,7 @@ make -k all      # unit + LOOPBACK_TARGETS（87）+ SVT_TARGETS（33）
 | 100G RS-FEC（Clause 91，`100gr`） | `loopback_100gr` | `stress_100gr` | `multi_reset_100gr` | `disturb_100gr` | `svt_100gr` | `svt_100gr_reset` |
 | 200G（Clause 119） | `loopback_200g` | `stress_200g` | `multi_reset_200g` | `disturb_200g` | `svt_200g` | `svt_200g_reset` |
 | 50GBASE-R（SVT 交叉扩展） | — | — | — | — | `svt_50g`（已执行通过） | `svt_50g_reset`（已执行通过） |
-| 400GBASE-R（Clause 119，SVT 交叉扩展） | — | — | — | — | `svt_400g`（已执行但失败） | `svt_400g_reset`（尚未执行） |
+| 400GBASE-R（Clause 119，SVT 交叉扩展） | — | — | — | — | `svt_400g`（已执行通过） | `svt_400g_reset`（已执行通过） |
 | 1000BASE-X | `loopback_1g` | `stress_1g` | `multi_reset_1g` | `disturb_1g` | `svt_1g` | `svt_1g_reset` |
 | 2.5GBASE-X | `loopback_2p5g` | `stress_2p5g` | `multi_reset_2p5g` | `disturb_2p5g` | `svt_2p5g` | `svt_2p5g_reset` |
 
@@ -89,13 +89,40 @@ make -k all      # unit + LOOPBACK_TARGETS（87）+ SVT_TARGETS（33）
 - **复位/扰动窗内 VIP 报错**：`register_fail:*` 仅在复位窗内降为 WARNING，窗外
   原样报错。
 
-## 5. 待办项（不纳入当前 `make all`）
+## 5. 回归状态与待办项
 
-当前已完成并核对：`make -k all` 在 53 上退出码为 0；`make unit` 的 78697 项检查通过，87 个环回目标和 35 个 SVT 目标通过，均为 `UVM_ERROR=0`、`UVM_FATAL=0`。其中新增的 50G 普通 SVT 交叉和交叉复位已纳入默认回归并通过；普通交叉日志判据为 `A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000`，复位日志判据为 `CROSS_RESET_RECOVERY_PASS rounds=3` 和 `A: vip_tx=100 our_rx=100 bad=0 | B: our_tx=200 vip_rx=200`，两者均满足 `invalid_block=0`、`fec_uncorr=0`、`tx_underrun=0`、`UVM_ERROR : 0`、`UVM_FATAL : 0`。400G 普通 SVT 交叉已执行但失败（RS 解码未通过并出现 VIP PCS 错误），因此不能计入通过数；400G 交叉复位尚未执行。
+2026-09-19 在 53 上按登录 shell 执行了新的完整回归；进程内设置了
+`DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12` 和
+`ETH_SVT_DESIGN=/home/ubuntu/ryan/eth_svt_design`。`make -k all` 的组成是
+`make unit`、87 个环回目标和当前 37 个 SVT 目标（共 125 个 recipe，另有
+共享编译前置目标）。结果如下，首轮回归的失败项与后续定向重跑分开记录：
+
+| 类别 | 首轮完整回归 | 定向重跑 | 合并状态 |
+|---|---|---|---|
+| unit | `UNIT_TEST_PASS`，78697 项 | — | 通过 |
+| 环回 87 项 | 87/87 通过 | — | 87/87 通过 |
+| SVT 普通 19 项 | 18 通过；`svt_40g_fec` 在 UVM/VIP 初始化后超过 10 分钟无仿真时间推进，被终止并记为 `Error 255` | 受控 `timeout 900s` 重跑通过（直接复用已编译 `simv`，退出码 0） | 19/19 有通过证据 |
+| SVT 复位 18 项 | 18/18 通过 | — | 18/18 通过 |
+
+首轮完整回归日志为 `build/full_regression.log`，`build/full_regression.exit=2`，
+结束行是 `FULL_REGRESSION_END 2026-09-19T21:00:38+08:00 rc=2`；失败日志
+`build/svt/run_40g_fec.stall.log` 只包含初始化信息。定向重跑生成的
+`build/svt/run_40g_fec.log` 通过同一普通交叉判据；随后直接复用已编译
+`simv` 的 `build/svt/run_40g_fec_retry.log` 也通过，最终为
+`A: vip_tx=500 our_rx=500 bad=0 | B: our_tx=1000 vip_rx=1000`、
+`PCS_STATS frames=500 ... invalid_block=0 ... fec_uncorr=0 tx_underrun=0`、
+`UVM_ERROR : 0`、`UVM_FATAL : 0`。因此当前 37 个 SVT 目标均有一次完整通过
+执行；首轮停滞仍保留为“已执行但失败”的历史记录，没有目标尚未执行。直接
+重跑命令的结果记录为 `RETRY_DIRECT_RC=0`。
+
+本轮所有 87 个环回日志和首轮返回的 36 个 SVT 日志均满足各自目标匹配行、
+`UVM_ERROR : 0` 与 `UVM_FATAL : 0`。复位/扰动窗口内由 demoter 降级的预期 VIP
+checker warning 不改变目标判据；注错窗口中的 `invalid_block`、CRC 或
+`fec_uncorr` 计数按对应目标的恢复匹配行判定。
 
 | 项 | 当前状态 | 计划交付 | 前置确认 |
 |---|---|---|---|
-| 50G SVT 交叉 | 普通交叉和交叉复位均已执行通过。VIP `ETH_50G_1_LANE` 的 4-lane AM/deskew、PMA 时钟和双向计数判据已接通 | 保持回归覆盖；若修改 50G PMA/MLD，再重跑普通与复位交叉 | 正式流程使用 `v_serial_25g_clk`；不再添加 `+PMA_RX_DIV2`。复位判据：`CROSS_RESET_RECOVERY_PASS rounds=3` 及 `A: vip_tx=100 our_rx=100 bad=0 \| B: our_tx=200 vip_rx=200` |
-| 400G SVT 交叉 | 普通交叉已执行但失败：当前 16-lane Clause 119 实现的 RS 解码未通过，并触发 VIP PCS checksum/block 错误；交叉复位尚未执行 | 按现有流程继续确认真实 CDBI lane/codeword 映射；映射稳定且普通交叉通过后再执行 `svt_400g_reset`，并覆盖链路复位和 RS-FEC 判据 | 明确 SVT `ETH_400G_SERIAL` 双 8-lane PCS 的 AM/对齐、四码字交织和 lane 映射；诊断日志不能替代 `UVM_ERROR/FATAL=0` 及双方计数判据 |
+| 50G SVT 交叉 | 本轮完整回归的普通/复位目标均通过。VIP `ETH_50G_1_LANE` 的 4-lane AM/deskew、PMA 时钟和双向计数判据已接通 | 保持回归覆盖；若修改 50G PMA/MLD，再重跑普通与复位交叉 | 正式流程使用 `v_serial_25g_clk`；不再添加 `+PMA_RX_DIV2`。复位判据：`CROSS_RESET_RECOVERY_PASS rounds=3` 及 `A: vip_tx=100 our_rx=100 bad=0 \| B: our_tx=200 vip_rx=200` |
+| 400G SVT 交叉 | 本轮完整回归的普通交叉和交叉复位均通过：16-lane Clause 119 CDBI 映射、AM/去偏斜和四码字交织与 `ETH_400G_SERIAL` 对接成功；普通交叉为 500/1000 双向帧，`PCS_STATS frames=500`，复位交叉为 3 轮、每段 100/200 帧，`PCS_STATS frames=400`；两者均为 `invalid_block=0`、`fec_uncorr=0`、`tx_underrun=0`、`UVM_ERROR/FATAL=0` | 已纳入正式 `SVT_TARGETS`，后续随 37 个 SVT 目标参与默认 `make all`；若 400G 实现再次修改，普通与交叉复位需同时重跑 | 运行时使用 `+C400_CLK_DIV=100 +C400_DEFER_FEC`；前者只降低行为级仿真时钟、保持位/字比例，后者只在空闲建链期间延迟 RS 检查，首段流量前及每次复位后均恢复完整检查；复位窗内 demoter 仅将预期 VIP checker warning 降级，窗外仍须满足双方计数及 `UVM_ERROR/FATAL=0` 判据 |
 
 DesignWare SVT R-2020.12 还提供 800G 接口枚举，但当前 DUT 和本项目回归范围未覆盖，暂不纳入本次代办。56G 在该 SVT 版本中没有对应的以太网 PCS 接口枚举，不能直接按 `+SPEED=56g` 增加目标。

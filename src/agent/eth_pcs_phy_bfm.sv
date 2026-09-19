@@ -273,8 +273,11 @@ class eth_pcs_phy_bfm;
     end
   endfunction
 
-  // 对外暴露 RX 侧对齐器统计的只读视图（多 lane 取各 lane 累计）
+  // 对外暴露 RX 侧对齐器统计的只读视图；Clause 119/CDBI 直接取其
+  // RS 解码器与重对齐计数，其余多 lane 模式按各 lane 累计。
   function int get_slip_count();
+    if (cfg.cl400) return c400rx.realign_count;
+    if (cfg.cl119) return c119rx.realign_count;
     if (cfg.rs_fec_enable) return rsrx.slip_count;
     if (cfg.num_lanes > 1) begin
       int s = 0;
@@ -288,14 +291,26 @@ class eth_pcs_phy_bfm;
   // FEC 纠错统计（RS-FEC 取码字计数；cl74 MLD 叠加时取各 lane 累计）
   function int get_fec_corrected();
     int s = 0;
+    if (cfg.cl400) return c400rx.rs_corrected();
+    if (cfg.cl119) return c119rx.rs_corrected();
     if (cfg.rs_fec_enable) return rsrx.corrected_count();
     if (cfg.num_lanes <= 1) return fdec.corrected_count;
     for (int i = 0; i < cfg.num_lanes; i++) s += fdec_l[i].corrected_count;
     return s;
   endfunction
 
+  // 400G simulation helper: AM/deskew can be established without running the
+  // behavioral RS(544,514) decoder on every idle pair.  Tests enable this
+  // after wait_lock() when traffic is about to start; normal users retain the
+  // default full FEC checking.
+  function void set_c400_decode_enable(bit en);
+    if (cfg.cl400) c400rx.set_decode_enable(en);
+  endfunction
+
   function int get_fec_uncorrectable();
     int s = 0;
+    if (cfg.cl400) return c400rx.rs_uncorrectable;
+    if (cfg.cl119) return c119rx.rs_uncorrectable;
     if (cfg.rs_fec_enable) return rsrx.rs_uncorrectable;
     if (cfg.num_lanes <= 1) return fdec.uncorrectable_count;
     for (int i = 0; i < cfg.num_lanes; i++) s += fdec_l[i].uncorrectable_count;
@@ -368,12 +383,22 @@ class eth_pcs_phy_bfm;
         tx_sample_loop();
         rx_pin_drive_loop();
       join_none
-      for (int i = 0; i < nphys(); i++) begin
-        automatic int li = i;
+      if (cfg.cl400) begin
+        // All 400G lanes share the same clock; batch them into one TX and one
+        // RX process to avoid 32 independent scheduler wake-ups per bit.
         fork
-          tx_serial_lane_loop(li);
-          rx_serial_lane_loop(li);
+          tx_serial_400g_loop();
+          rx_serial_400g_loop();
         join_none
+      end
+      else begin
+        for (int i = 0; i < nphys(); i++) begin
+          automatic int li = i;
+          fork
+            tx_serial_lane_loop(li);
+            rx_serial_lane_loop(li);
+          join_none
+        end
       end
       wait (0);
     end
@@ -749,6 +774,29 @@ class eth_pcs_phy_bfm;
     end
   endtask
 
+  // ETH_400G_SERIAL has sixteen physical lanes on one common PMA clock.
+  // Waking a separate SV process for every lane multiplies scheduler work by
+  // 16 (and the RX side by another 16) without adding any timing information.
+  // Process the whole lane vector from one clocking event; the per-lane FIFO
+  // and bit ordering remain identical to tx_serial_lane_loop().
+  protected task tx_serial_400g_loop();
+    logic b;
+    forever begin
+      @(cfg.vif_serial_lanes[0].tx_cb);
+      for (int li = 0; li < C400_LANES; li++) begin
+        if (txbit_lq[li].size() > 0) begin
+          b = txbit_lq[li].pop_front();
+          cfg.vif_serial_lanes[li].tx_cb.tx_bit <= b;
+          tx_started = 1;
+        end
+        else begin
+          cfg.vif_serial_lanes[li].tx_cb.tx_bit <= 1'b0;
+          if (tx_started) tx_underrun_count++;
+        end
+      end
+    end
+  endtask
+
   // 多 lane 串行接收线程：本 lane 块同步 -> 锁定块交 MLD ->
   // 重组出的块走公共交付路径
   // li 为物理 lane；PMA 解复用逐 bit 轮转分发到下属 PCS 流 p*m+k。
@@ -815,6 +863,23 @@ class eth_pcs_phy_bfm;
         while (mrx.pop_block(ob)) deliver_block(ob);
       end
       lane_lock_edge(pcs, bsync_l[pcs].is_locked());
+    end
+  endtask
+
+  // Batched 400G RX companion to tx_serial_400g_loop().  All sixteen
+  // clocking blocks sample the same edge, so one wake-up can safely feed the
+  // CDBI receiver in lane order and then drain any completed blocks.
+  protected task rx_serial_400g_loop();
+    logic lane_bits[C400_LANES];
+    block66_t ob;
+    forever begin
+      @(cfg.vif_serial_lanes[0].rx_cb);
+      for (int li = 0; li < C400_LANES; li++) begin
+        lane_bits[li] = $isunknown(cfg.vif_serial_lanes[li].rx_cb.rx_bit)
+                        ? 1'b0 : cfg.vif_serial_lanes[li].rx_cb.rx_bit;
+      end
+      c400rx.push_bits(lane_bits);
+      while (c400rx.pop_block(ob)) deliver_block(ob);
     end
   endtask
 
@@ -1048,6 +1113,12 @@ class eth_pcs_phy_bfm;
     c119rx.reset();
     c400tx.reset();
     c400rx.reset();
+    // +C400_DEFER_FEC keeps the expensive RS decoder off the idle bring-up
+    // stream.  The cross test explicitly enables it immediately before
+    // traffic; without the plusarg the historical full-checking behavior is
+    // unchanged.
+    if (cfg.cl400)
+      c400rx.set_decode_enable(!$test$plusargs("C400_DEFER_FEC"));
     if (cfg.num_lanes > 1) begin
       mtx.reset();
       mrx.reset();

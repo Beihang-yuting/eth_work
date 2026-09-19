@@ -590,6 +590,15 @@ package eth_svt_cross_pkg;
       #5us;
     endtask
 
+    // When 400G bring-up is run with +C400_DEFER_FEC, the receiver has only
+    // advanced its AM/descrambler state while waiting for link lock.  Turn
+    // full RS(544,514) checking on immediately before the first traffic
+    // segment (and after every reset) so all frame data is still validated.
+    protected function void enable_deferred_400g_fec();
+      if (is_400g && $test$plusargs("C400_DEFER_FEC"))
+        env.phy_agent.bfm.set_c400_decode_enable(1'b1);
+    endfunction
+
     // AN 模式：等 VIP 仲裁机进入 AN_GOOD（其 PCS 已锁定我方数据码流）；
     // 我方 wait_lock 只代表我方 AN 完成 + 锁定，VIP 未就绪时我方发的帧会丢
     protected task wait_vip_an_good();
@@ -667,6 +676,7 @@ package eth_svt_cross_pkg;
 
       phase.raise_objection(this);
       wait_lock();
+      enable_deferred_400g_fec();
       if (an_mode) wait_vip_an_good();
       run_traffic(na, nb);
 
@@ -807,6 +817,7 @@ package eth_svt_cross_pkg;
 
       phase.raise_objection(this);
       wait_lock();
+      enable_deferred_400g_fec();
       if (an_mode) wait_vip_an_good();
 
       for (int round = 0; round <= RESET_ROUNDS; round++) begin
@@ -838,6 +849,7 @@ package eth_svt_cross_pkg;
         if (an_mode) wait_vip_left_an_good();
         wait_lock();              // 我方重锁 VIP 码流（多 lane 含同周期
                                   // 锚定收敛，见 mld_rx 去偏斜注释）
+        enable_deferred_400g_fec();
         if (an_mode) wait_vip_an_good();
         #20us;                    // VIP 端重对齐我方新码流裕量
 

@@ -56,8 +56,23 @@ class rs91_gf_c;
     return exp_t[log_t[a] + log_t[b]];
   endfunction
 
+  // Hot-path variants used by the behavioral encoders/decoders.  All owning
+  // objects call build() in their constructors, so avoid the repeated static
+  // initialization guard and function call in every GF operation.  Keeping
+  // the checked mul()/div() entry points above preserves the public utility
+  // API used by unit tests.
+  static function rs91_sym_t mul_fast(rs91_sym_t a, rs91_sym_t b);
+    if (a == 0 || b == 0) return '0;
+    return exp_t[log_t[a] + log_t[b]];
+  endfunction
+
   static function rs91_sym_t div(rs91_sym_t a, rs91_sym_t b);
     build();
+    if (a == 0) return '0;
+    return exp_t[(log_t[a] - log_t[b] + 1023) % 1023];
+  endfunction
+
+  static function rs91_sym_t div_fast(rs91_sym_t a, rs91_sym_t b);
     if (a == 0) return '0;
     return exp_t[(log_t[a] - log_t[b] + 1023) % 1023];
   endfunction
@@ -65,6 +80,10 @@ class rs91_gf_c;
   // α^p（p 可为负）
   static function rs91_sym_t alpha_pow(int p);
     build();
+    return exp_t[((p % 1023) + 1023) % 1023];
+  endfunction
+
+  static function rs91_sym_t alpha_pow_fast(int p);
     return exp_t[((p % 1023) + 1023) % 1023];
   endfunction
 
@@ -81,6 +100,11 @@ class rs10_encoder_c #(int N = 528, int K = 514);
   localparam int P = N - K;
 
   protected rs91_sym_t g[P+1];
+  // Multiplication by each generator coefficient is the hottest operation in
+  // the behavioral encoder (400G emits an RS(544,514) codeword pair every
+  // few dozen simulated nanoseconds).  Precompute the 10-bit lookup once so
+  // the steady-state LFSR only performs table reads and XORs.
+  protected rs91_sym_t gmul[P][RS91_FIELD];
 
   function new();
     rs91_sym_t tmp[P+1];
@@ -92,10 +116,13 @@ class rs10_encoder_c #(int N = 528, int K = 514);
       for (int j = 0; j <= i; j++) begin
         tmp[j+1] = tmp[j+1] ^ g[j];                                    // *x
         tmp[j]   = tmp[j]   ^ rs91_gf_c::mul(g[j],
-                                             rs91_gf_c::alpha_pow(i)); // *α^i
+                                             rs91_gf_c::alpha_pow_fast(i)); // *α^i
       end
       foreach (g[j]) g[j] = tmp[j];
     end
+    for (int j = 0; j < P; j++)
+      for (int x = 0; x < RS91_FIELD; x++)
+        gmul[j][x] = rs91_gf_c::mul_fast(x[RS91_M-1:0], g[j]);
   endfunction
 
   function void encode(input rs91_sym_t data[K], output rs91_sym_t cw[N]);
@@ -107,8 +134,8 @@ class rs10_encoder_c #(int N = 528, int K = 514);
     for (int i = 0; i < K; i++) begin
       fb = data[i] ^ par[P-1];
       for (int j = P-1; j > 0; j--)
-        par[j] = par[j-1] ^ rs91_gf_c::mul(fb, g[j]);
-      par[0] = rs91_gf_c::mul(fb, g[0]);
+        par[j] = par[j-1] ^ gmul[j][fb];
+      par[0] = gmul[0][fb];
     end
 
     for (int i = 0; i < K; i++) cw[i] = data[i];
@@ -147,16 +174,20 @@ class rs10_decoder_c #(int N = 528, int K = 514);
     rs91_sym_t tpoly[T+1];
     rs91_sym_t omega[P];
     int        err_pos[T];
-    rs91_sym_t err_val, delta, d, dinv, xi, num, den, tmp;
+    rs91_sym_t err_val, delta, d, dinv, xi, num, den, tmp, root;
     int        L, m, nerr, pw;
     bit        has_err;
 
     // --- 伴随式 S_i = cw(α^i)，i = 0..P-1 ---
     has_err = 0;
     for (int i = 0; i < P; i++) begin
-      tmp = '0;
-      for (int j = 0; j < N; j++)
-        tmp = tmp ^ rs91_gf_c::mul(cw[j], rs91_gf_c::alpha_pow(i * (N-1-j)));
+      // Horner evaluation at α^i avoids an alpha_pow() and modulo operation
+      // for every symbol.  This is equivalent to the coefficient form above
+      // and is material for the four 544-symbol codewords at 400G.
+      root = rs91_gf_c::alpha_pow_fast(i);
+      tmp  = cw[0];
+      for (int j = 1; j < N; j++)
+        tmp = rs91_gf_c::mul_fast(tmp, root) ^ cw[j];
       synd[i] = tmp;
       if (tmp != 0) has_err = 1;
     end
@@ -174,25 +205,25 @@ class rs10_decoder_c #(int N = 528, int K = 514);
     for (int n = 0; n < P; n++) begin
       delta = synd[n];
       for (int i = 1; i <= L; i++)
-        delta = delta ^ rs91_gf_c::mul(lambda[i], synd[n-i]);
+        delta = delta ^ rs91_gf_c::mul_fast(lambda[i], synd[n-i]);
 
       if (delta == 0) begin
         m++;
       end
       else if (2*L <= n) begin
         foreach (tpoly[i]) tpoly[i] = lambda[i];
-        dinv = rs91_gf_c::div(delta, d);
+        dinv = rs91_gf_c::div_fast(delta, d);
         for (int i = 0; i + m <= T; i++)
-          lambda[i+m] = lambda[i+m] ^ rs91_gf_c::mul(dinv, bpoly[i]);
+          lambda[i+m] = lambda[i+m] ^ rs91_gf_c::mul_fast(dinv, bpoly[i]);
         L = n + 1 - L;
         foreach (bpoly[i]) bpoly[i] = tpoly[i];
         d = delta;
         m = 1;
       end
       else begin
-        dinv = rs91_gf_c::div(delta, d);
+        dinv = rs91_gf_c::div_fast(delta, d);
         for (int i = 0; i + m <= T; i++)
-          lambda[i+m] = lambda[i+m] ^ rs91_gf_c::mul(dinv, bpoly[i]);
+          lambda[i+m] = lambda[i+m] ^ rs91_gf_c::mul_fast(dinv, bpoly[i]);
         m++;
       end
     end
@@ -208,7 +239,7 @@ class rs10_decoder_c #(int N = 528, int K = 514);
       pw  = N - 1 - j;
       tmp = lambda[0];
       for (int i = 1; i <= L; i++)
-        tmp = tmp ^ rs91_gf_c::mul(lambda[i], rs91_gf_c::alpha_pow(-i * pw));
+        tmp = tmp ^ rs91_gf_c::mul_fast(lambda[i], rs91_gf_c::alpha_pow_fast(-i * pw));
       if (tmp == 0) begin
         if (nerr >= T) begin
           uncorrectable_count++;
@@ -230,25 +261,25 @@ class rs10_decoder_c #(int N = 528, int K = 514);
     for (int i = 0; i < P; i++)
       for (int j = 0; j <= L; j++)
         if (i + j < P)
-          omega[i+j] = omega[i+j] ^ rs91_gf_c::mul(synd[i], lambda[j]);
+          omega[i+j] = omega[i+j] ^ rs91_gf_c::mul_fast(synd[i], lambda[j]);
 
     // --- Forney：e = X·omega(X^-1) / lambda'(X^-1)（根从 α^0 起，b0=0）---
     for (int k = 0; k < nerr; k++) begin
       pw  = N - 1 - err_pos[k];
-      xi  = rs91_gf_c::alpha_pow(pw);
+      xi  = rs91_gf_c::alpha_pow_fast(pw);
       num = '0;
       for (int i = 0; i < P; i++)
-        num = num ^ rs91_gf_c::mul(omega[i], rs91_gf_c::alpha_pow(-i * pw));
+        num = num ^ rs91_gf_c::mul_fast(omega[i], rs91_gf_c::alpha_pow_fast(-i * pw));
       // GF(2) 上导数只保留奇次项
       den = '0;
       for (int i = 1; i <= L; i += 2)
-        den = den ^ rs91_gf_c::mul(lambda[i], rs91_gf_c::alpha_pow(-(i-1) * pw));
+        den = den ^ rs91_gf_c::mul_fast(lambda[i], rs91_gf_c::alpha_pow_fast(-(i-1) * pw));
       if (den == 0) begin
         uncorrectable_count++;
         return 0;
       end
       // X_k 因子不可省（漏乘会得到错误的错值，纠错后码字仍不对）
-      err_val        = rs91_gf_c::mul(xi, rs91_gf_c::div(num, den));
+      err_val        = rs91_gf_c::mul_fast(xi, rs91_gf_c::div_fast(num, den));
       cw[err_pos[k]] = cw[err_pos[k]] ^ err_val;
     end
 

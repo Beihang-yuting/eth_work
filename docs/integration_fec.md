@@ -163,7 +163,9 @@ top 不用改：`eth_pcs_lb_env(a, b)` 已经包含单 lane 口和 10 条 lane �
 ## 7. 已知限制（TODO）
 
 - 标准 AM 周期（1024 / 4096 码字）未参数化。
-- 50G / 400G RS-FEC、KP4 以外的 200G 变体未做。
+- 50G RS-FEC、KP4 以外的 200G 变体未做；400G CDBI 的 KP4
+  RS(544,514) 已完成 SVT 普通交叉与交叉复位验证，使用方法和判据见
+  `integration_100g_200g.md` §4.1。
 - Clause 74 的 `enable_fec_error`（FEC 向 PCS 报不可纠）未对接；我方不可纠
   码字照常透传，由 PCS 解码与 CRC 暴露，cl74 下 hi_ber 因此不会触发（见
   第 3 节）。

@@ -142,7 +142,7 @@ class c119_tx_c;
 
   protected block66_t        grp[$];
   protected logic            msg[$];        // 当前码字对的信息 bit
-  protected int              pair_idx;      // 0..3（0 = 带 AM 的首对）
+  protected int              pair_idx;      // 0..7（0 = 带 AM 的首对）
   protected logic [8:0]      prbs9;
   protected c119_scrambler_c scr;
   protected rs544_encoder_c  enc;
@@ -503,7 +503,7 @@ class c400_tx_c;
 
   protected block66_t        grp[$];
   protected logic            msg[$];        // 当前码字对的信息 bit
-  protected int              pair_idx;      // 0..7（0 = 带 AM 的首对）
+  protected int              pair_idx;      // 0..3（0 = 带 AM 的首对）
   protected logic [8:0]      prbs9;
   protected c119_scrambler_c scr;
   protected rs544_encoder_c  enc;
@@ -620,10 +620,20 @@ class c400_rx_c;
   protected c119_scrambler_c descr;
   protected rs544_decoder_c  dec;
   protected bit              warm;          // 对齐后首个 257b 组待丢弃
+  // Link bring-up only needs AM/deskew alignment.  The BFM may defer the
+  // expensive RS(544,514) checks while the link carries elastic idle; the
+  // information-symbol path below still advances the descrambler state.
+  protected bit              decode_enable;
+  // The 400G BFM samples all lanes in one common-clock callback.  Defer the
+  // first try_align() until that callback has supplied every lane so a lane
+  // whose AM happens to lock early in the vector cannot align against a
+  // partially updated set of queues.
+  protected bit              defer_align;
 
   function new();
     descr = new();
     dec   = new();
+    decode_enable = 1;
     reset();
   endfunction
 
@@ -638,6 +648,17 @@ class c400_rx_c;
     pair_idx = 0;
     out_q.delete();
     descr.reset();
+    defer_align = 0;
+  endfunction
+
+  // Runtime switch used by the owning BFM during idle-only bring-up.  The
+  // default stays enabled for stand-alone users and unit tests.
+  function void set_decode_enable(bit en);
+    decode_enable = en;
+  endfunction
+
+  function bit is_decode_enabled();
+    return decode_enable;
   endfunction
 
   function bit is_aligned();
@@ -646,6 +667,23 @@ class c400_rx_c;
 
   function int rs_corrected();
     return dec.corrected_count;
+  endfunction
+
+  // Push one common PMA-clock sample for all sixteen lanes.  The per-lane
+  // push_bit() API remains available for unit tests and non-batched callers;
+  // this wrapper only defers the alignment transition until the complete
+  // vector has been consumed.
+  function void push_bits(input logic bits[C400_LANES]);
+    bit was_deferred;
+    was_deferred = defer_align;
+    defer_align = 1;
+    for (int pl = 0; pl < C400_LANES; pl++)
+      push_bit(pl, bits[pl]);
+    defer_align = was_deferred;
+    if (!defer_align) begin
+      if (!aligned) try_align();
+      else          pump();
+    end
   endfunction
 
   // 窗口是否为某 lane 的 AM；返回逻辑 lane 或 -1
@@ -671,7 +709,7 @@ class c400_rx_c;
           foreach (win[pl][i]) q[pl].push_back(win[pl][i]);   // 自 AM 起
           win[pl].delete();
           am_locks++;
-          try_align();
+          if (!defer_align) try_align();
         end
       end
       return;
@@ -681,7 +719,7 @@ class c400_rx_c;
       return;
     end
     q[pl].push_back(b);
-    if (aligned) pump();
+    if (aligned && !defer_align) pump();
   endfunction
 
   // 全 lane 锁定后去偏斜：各 lane 队列都从 AM 起，比最短者长出半周期
@@ -765,9 +803,15 @@ class c400_rx_c;
       end
     end
     // Raw/codeword dumps and mapping sweeps are intentionally omitted from
-    // the production path.  The flattened CDBI mapping above remains under
-    // SVT review; current 400G cross-checks do not yet pass.
-    for (c = 0; c < 4; c++) ok[c] = dec.decode(cw[c]);
+    // the production path.  The flattened CDBI mapping above is validated by
+    // the SVT ETH_400G_SERIAL cross-check.  During deferred bring-up we skip
+    // parity checks but retain the information symbols and descrambler
+    // progression below, so enabling FEC at a pair boundary is transparent
+    // to subsequent traffic.
+    if (decode_enable)
+      for (c = 0; c < 4; c++) ok[c] = dec.decode(cw[c]);
+    else
+      for (c = 0; c < 4; c++) ok[c] = 1;
     for (int i = 0; i < 514; i++)
       for (c = 0; c < 4; c++)
         for (int j = 0; j < 10; j++)
@@ -777,6 +821,12 @@ class c400_rx_c;
       for (int i = 0; i < 257; i++) t[i] = msg[b+i];
       t = descr.descramble(t);
       if (warm) begin warm = 0; continue; end
+      // In deferred mode this pass exists solely to advance the self
+      // synchronizing scrambler; no XGMII blocks are needed while link-up is
+      // still being established.  Consume the one post-lock warm-up group
+      // above even in deferred mode, so enabling FEC later cannot discard the
+      // first valid traffic group.
+      if (!decode_enable) continue;
       c119_transcode_dec(t, g4);
       for (int i = 0; i < 4; i++) begin
         if (!(ok[0] && ok[1] && ok[2] && ok[3])) g4[i].sync = 2'b11;

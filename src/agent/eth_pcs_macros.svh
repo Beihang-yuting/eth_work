@@ -154,6 +154,10 @@
   realtime pfx``_gmii_half = 4000, pfx``_xgmii_half = 3200, pfx``_sx_half = 400; \
   /* BASE-R 串行位钟与 XSBI（=位钟/16）：默认 10G；+SPEED=5g 各 ×2 周期 */ \
   realtime pfx``_sbr_half = 96.97/2.0, pfx``_xsbi_half = 1551.52/2.0; \
+  /* Optional 400G behavioral clock divider; bit/word ratios are unchanged. */ \
+  int pfx``_c400_clk_div = 1; \
+  realtime pfx``_scd_half = 18.824, pfx``_cdmii_half = 80.0, \
+           pfx``_cdxbi_half = 376.48/2.0, pfx``_srxaui_half = 80.0; \
   /* 超高速串行钟（半周期 4.7~9.7ps）默认慢速翻转：只保证"在转"防 VIP */ \
   /* 假死，避免拖慢所有 svt 仿真；接对应模式时由 +SPEED 切真实频率 */ \
   realtime pfx``_s100g_half = 4000, pfx``_s50g_half = 4000; \
@@ -161,6 +165,14 @@
   initial begin \
     string sp_s; \
     void'($value$plusargs("SPEED=%s", sp_s)); \
+    if (sp_s == "400g") begin \
+      void'($value$plusargs("C400_CLK_DIV=%d", pfx``_c400_clk_div)); \
+      if (pfx``_c400_clk_div < 1) pfx``_c400_clk_div = 1; \
+      pfx``_scd_half     = 18.824 * pfx``_c400_clk_div; \
+      pfx``_cdmii_half  = 80.0   * pfx``_c400_clk_div; \
+      pfx``_cdxbi_half  = 188.24 * pfx``_c400_clk_div; \
+      pfx``_srxaui_half = 80.0   * pfx``_c400_clk_div; \
+    end \
     if (sp_s == "2.5g") begin \
       pfx``_gmii_half  = 1600;   /* GMII 312.5MHz */ \
       pfx``_xgmii_half = 12800;  /* XGMII 39.0625MHz（VIP 2.5G 文档值）*/ \
@@ -192,7 +204,7 @@
   always #640        pfx``_lgmii_clk     = ~pfx``_lgmii_clk; \
   always #620.608    pfx``_lsbi_clk      = ~pfx``_lsbi_clk; \
   always #38.788     pfx``_s12p5g_clk    = ~pfx``_s12p5g_clk; \
-  always #18.824     pfx``_scd_clk       = ~pfx``_scd_clk; \
+  always #(pfx``_scd_half) pfx``_scd_clk  = ~pfx``_scd_clk; \
   always #1551.52    pfx``_vsbi_clk      = ~pfx``_vsbi_clk; \
   always #1600       pfx``_xfbi_clk      = ~pfx``_xfbi_clk; \
   always #800        pfx``_xlgmii_clk    = ~pfx``_xlgmii_clk; \
@@ -223,14 +235,14 @@
   always #4000       pfx``_tbi_clk       = ~pfx``_tbi_clk; \
   always #200        pfx``_mdio_clk      = ~pfx``_mdio_clk; \
   always #160        pfx``_ccmii_clk     = ~pfx``_ccmii_clk;   /* 200G 3.125GHz */ \
-  always #80         pfx``_cdmii_clk     = ~pfx``_cdmii_clk;   /* 400G 6.25GHz */ \
-  always #(376.48/2.0) pfx``_cdxbi_clk   = ~pfx``_cdxbi_clk;   /* 示例值 */ \
+  always #(pfx``_cdmii_half) pfx``_cdmii_clk = ~pfx``_cdmii_clk;   /* 400G 6.25GHz */ \
+  always #(pfx``_cdxbi_half) pfx``_cdxbi_clk = ~pfx``_cdxbi_clk;   /* 示例值 */ \
   always #40         pfx``_dcccmii_clk   = ~pfx``_dcccmii_clk; /* 800G 推导 */ \
   always #620.608    pfx``_lsbi1_clk     = ~pfx``_lsbi1_clk;   /* 同 lsbi */ \
   always #500000     pfx``_ptp_clk       = ~pfx``_ptp_clk;     /* 示例值 */ \
   always #4000       pfx``_rgmii_clk     = ~pfx``_rgmii_clk;   /* 125MHz */ \
   always #3200       pfx``_rxaui_clk     = ~pfx``_rxaui_clk;   /* 推导 */ \
-  always #80         pfx``_srxaui_clk    = ~pfx``_srxaui_clk;  /* 6.25G 推导 */ \
+  always #(pfx``_srxaui_half) pfx``_srxaui_clk = ~pfx``_srxaui_clk;  /* 6.25G 推导 */ \
   always #7500       pfx``_s100bt1_clk   = ~pfx``_s100bt1_clk; /* 推导 */ \
   always #666.667    pfx``_sbt1_clk      = ~pfx``_sbt1_clk;    /* 推导 */ \
   always #4000       pfx``_smii_clk      = ~pfx``_smii_clk;    /* 125MHz */ \
