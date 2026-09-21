@@ -21,6 +21,7 @@ aip_clk（vendored 于 third_party/aip_core，精度提到 1fs），字/位时�
   `docs/integration_100g_200g.md`（100G CAUI-10/CAUI-4、200G Clause 119）、
   `docs/integration_fec.md`（FEC 叠加：Clause 74 单 lane/每 PCS lane、
   25G RS-FEC Clause 108、100G RS-FEC Clause 91）
+- SVT/VIP env 与 net-packet 用户手册：`docs/svt_vip_user_guide.md`
 - 可跑示例（每模式一份）：`examples/10g_basekr_loopback/`、
   `examples/25g_loopback/`、`examples/40g_loopback/`、
   `examples/1g_2p5g_loopback/`、`examples/100g_200g_loopback/`、
